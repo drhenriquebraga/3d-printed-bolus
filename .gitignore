@@ -1,0 +1,57 @@
+# Patient data: never commit it. The pre-commit hook (.githooks/pre-commit)
+# runs the Suite's tools/check_project.py [5b], which also reads the content,
+# for DICOM without an extension.
+*.[dD][cC][mM]
+*.[dD][iI][cC][oO][mM]
+*.[nN][iI][iI]
+*.[nN][iI][iI].[gG][zZ]
+*.[nN][rR][rR][dD]
+*.[nN][hH][dD][rR]
+*.[mM][hH][aA]
+*.[mM][hH][dD]
+*.[rR][aA][wW]
+*.[rR][aA][wW].[gG][zZ]
+*.[zZ][rR][aA][wW]
+*.[hH][dD][rR]
+*.[iI][mM][gG]
+*.[iI][mM][gG].[gG][zZ]
+*.[mM][gG][zZ]
+DICOMDIR
+Patients/
+RS_RadAI_*
+_RadAI/
+registro/
+calibracao/
+VALIDACAO/
+acervo.jsonl
+_pseudonimo.chave
+
+# Run state of a workstation: it names series and patients
+*.log
+*_log.txt
+*_LOG.txt
+arranque_*.txt
+radai_status.json
+*_status.json
+radai_watcher.config
+
+# Paths of this machine, read by verify.cmd
+_python.txt
+_bundle.txt
+_dados.txt
+
+# Build and package output
+_montagem/
+*.zip
+*.tar
+*.tar.gz
+node_modules/
+tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Secrets
+.env

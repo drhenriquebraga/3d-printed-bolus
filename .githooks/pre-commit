@@ -1,0 +1,37 @@
+#!/bin/sh
+# GUARDA: liga-se uma vez por clone (git config core.hooksPath .githooks); roda a varredura [5b] do tools/check_project.py da Suite (a pasta irma com tools/_componentes.py) sobre o stage deste repositorio.
+# GUARDA: na duvida recusa: sem a Suite, sem Python ou sem ler o stage, o commit nao passa.
+# GUARDA: sh, LF e ASCII puro: o Git for Windows roda ganchos com o sh dele, e um CR no fim da linha quebra o interpretador.
+
+raiz=$(git rev-parse --show-toplevel) || exit 1
+suite=""
+for d in "$raiz"/../*/; do
+  if [ -f "${d}tools/_componentes.py" ] && [ -f "${d}tools/check_project.py" ]; then
+    suite="$d"
+  fi
+done
+if [ -z "$suite" ]; then
+  echo "pre-commit: nao achei a Suite (a pasta irma com tools/_componentes.py)." >&2
+  echo "O commit foi RECUSADO porque a checagem de dado de paciente nao rodou." >&2
+  exit 1
+fi
+varredura="${suite}tools/check_project.py"
+teste='import sys; sys.exit(0 if sys.version_info >= (3, 6) else 1)'
+
+for c in "${suite}.venv/Scripts/python.exe" "${suite}.venv/bin/python"; do
+  if [ -x "$c" ] && "$c" -c "$teste" >/dev/null 2>&1; then
+    exec "$c" "$varredura" --paciente-no-stage
+  fi
+done
+if command -v py >/dev/null 2>&1 && py -3 -c "$teste" >/dev/null 2>&1; then
+  exec py -3 "$varredura" --paciente-no-stage
+fi
+for c in python python3; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c "$teste" >/dev/null 2>&1; then
+    exec "$c" "$varredura" --paciente-no-stage
+  fi
+done
+
+echo "pre-commit: nao achei um Python 3 que responda. O commit foi" >&2
+echo "RECUSADO porque a checagem de dado de paciente nao rodou." >&2
+exit 1
