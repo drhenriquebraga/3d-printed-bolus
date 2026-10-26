@@ -136,7 +136,7 @@ from the seven repositories. Its surface and STL writer are also used by the
 3D Reconstructions module.
 
 To use it, install the Suite with its light installer, from the
-[releases of radioterapia-ai/local-suite][rel] (the permanent link to the
+[releases of drhenriquebraga/local-suite][rel] (the permanent link to the
 newest one is [`RADIOTERAPIA_AI_LOCAL_SUITE_SETUP_LATEST.zip`][latest]);
 requirements and installation are in the Suite README.
 
@@ -213,6 +213,6 @@ Built by Dr. Henrique Braga, radiation oncologist —
 **[radioterapia.ai](https://radioterapia.ai)**.
 
 [sitk]: https://simpleitk.org
-[suite]: https://github.com/radioterapia-ai/local-suite
-[rel]: https://github.com/radioterapia-ai/local-suite/releases
-[latest]: https://github.com/radioterapia-ai/local-suite/releases/latest/download/RADIOTERAPIA_AI_LOCAL_SUITE_SETUP_LATEST.zip
+[suite]: https://github.com/drhenriquebraga/local-suite
+[rel]: https://github.com/drhenriquebraga/local-suite/releases
+[latest]: https://github.com/drhenriquebraga/local-suite/releases/latest/download/RADIOTERAPIA_AI_LOCAL_SUITE_SETUP_LATEST.zip

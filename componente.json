@@ -3,7 +3,7 @@
   "nome": "3D_PRINTED_BOLUS",
   "rotulo": "3D Printed Bolus",
   "modulo_da_porta": "bolus",
-  "repositorio": "radioterapia-ai/3d-printed-bolus",
+  "repositorio": "drhenriquebraga/3d-printed-bolus",
   "app": [
     "radai_bolus.py",
     "radai_bolus_aplicador.py",
