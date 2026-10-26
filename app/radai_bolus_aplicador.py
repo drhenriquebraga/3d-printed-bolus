@@ -23,6 +23,13 @@ class Bloqueio(RecusaDoCampo):
         self.detalhe = dict(detalhe or {})
 
 
+class ColocacaoVirou(Exception):
+
+    def __init__(self, direcao):
+        Exception.__init__(self, direcao)
+        self.direcao = direcao
+
+
 AFTERLOADERS = (
     {"chave": "microselectron_digital", "nome": u"microSelectron Digital",
      "piso_mm": 13.0, "conferido": True, "curta": u"ficha da Elekta",
@@ -107,6 +114,17 @@ FALHA_DO_REFINO_MAX = 0.10
 FALHA_DO_REFINO_MAX_MM = 5.0
 DESVIO_DA_PELE_AVISO_MM = 0.5
 MEDIDAS_POR_CANAL = 200
+LARGURA_BOA_DA_TRANSICAO = 3.0
+FOLGA_DA_MELHOR_LARGURA = 1.5
+MEIA_JANELA_MAX = 4
+PUREZA_DA_REFERENCIA = 0.1
+CONTRASTE_MIN_HU = 300.0
+BLOCO_DA_PELE = 20000
+MARGEM_DA_SUGERIDA_MM = 1.0
+SUGERIDA_DESCARTADA = (u"Sem caixa sugerida: na caixa aparada em que os "
+                       u"canais caberiam, a colocação automática mudaria de "
+                       u"direção. Fixe a colocação no formulário e gere de "
+                       u"novo para ver a sugestão nela.")
 
 TRAJETOS = ("aberto", "cego")
 ENTRADAS = ("inicio", "fim")
@@ -273,8 +291,10 @@ AJUDA = {
     ),
     "superficie": (
         u"A pele que o desenho usa é a do limiar fixo de %d HU, a mesma do "
-        u"bólus: a face interna da peça e a distância do canal até a pele "
-        u"seguem o ponto em que a TC cruza esse valor, entre dois voxels."
+        u"bólus: a face interna da peça segue o ponto em que a TC cruza esse "
+        u"valor, entre dois voxels. A distância do canal até a pele e a curva "
+        u"do canal seguem a borda medida pelo volume parcial dos voxels desse "
+        u"cruzamento, que não oscila com a posição da pele entre os cortes."
         % int(B.LIMIAR_HU),
         u"A janela da TC muda a pele percebida em 1 a 2 mm (Bellis); "
         u"Bielęda desenhou na janela de pulmão porque a de partes moles "
@@ -311,9 +331,10 @@ AJUDA = {
     "eixo": (
         u"Os canais correm paralelos entre si, nesta direção, e acompanham a "
         u"pele: a curva de cada canal é a da pele naquela linha, suavizada "
-        u"em %d mm, e é medida inteira. Automática: craniocaudal, ou "
-        u"laterolateral quando a colocação é superior ou inferior."
-        % int(SUAVE_DA_LINHA_MM),
+        u"em %d mm, e é medida inteira. Automática: o app traça as duas "
+        u"direções perpendiculares à colocação e fica com a que acomoda mais "
+        u"canais; no empate, craniocaudal, ou laterolateral quando a "
+        u"colocação é superior ou inferior." % int(SUAVE_DA_LINHA_MM),
     ),
     "trajeto": (
         u"Aberto: o canal atravessa o corpo de face a face, e a ponta e o "
@@ -540,6 +561,13 @@ def eixo_do_canal(eixo, direcao):
     return ax
 
 
+def eixos_do_canal(eixo, direcao):
+    au = eixo_do_canal(eixo, direcao)
+    if eixo in (None, "", "auto"):
+        return [au, 3 - B._NORMAL[direcao][0] - au]
+    return [au]
+
+
 def nome_do_eixo(ax):
     for chave, a, nome in EIXOS:
         if a == ax:
@@ -620,7 +648,72 @@ def _amostrar(campo, pts_mm, h):
                                    order=1, mode="nearest")
 
 
-def pontos_da_pele(J, corpo, h):
+def larguras_da_transicao(normais, esp):
+    a = np.abs(np.asarray(normais, dtype=np.float64)) * np.asarray(
+        esp, dtype=np.float64)[None, :]
+    tot = a.sum(axis=1, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = 1.0 + 2.0 * (tot - a) / a
+    w[~np.isfinite(w)] = np.inf
+    return w
+
+
+def borda_por_volume_parcial(hu, esp, off, pts, k, s, w):
+    from scipy import ndimage
+    esp = np.asarray(esp, dtype=np.float64)
+    pts = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
+    c = (np.asarray(off, dtype=np.float64)[None, :] + pts) / esp[None, :]
+    K = np.ceil(c[:, k] - 1e-9) if s > 0 else np.floor(c[:, k] + 1e-9)
+    R = MEIA_JANELA_MAX
+    meia = np.minimum(R, np.ceil(np.asarray(w) / 2.0).astype(int) + 1)
+    js = np.arange(-R - 2, R + 2)
+    n = len(pts)
+    coords = np.empty((3, n, len(js)))
+    for ax in range(3):
+        coords[2 - ax] = c[:, ax][:, None]
+    coords[2 - k] = K[:, None] + s * js[None, :]
+    v = ndimage.map_coordinates(hu, coords.reshape(3, -1), order=1,
+                                mode="nearest", output=np.float64).reshape(
+                                    n, len(js))
+    del coords
+    linhas = np.arange(n)
+    ia, ib = R + 1 - meia, R + 2 + meia
+    ar, tr = v[linhas, ia], v[linhas, ib]
+    den = tr - ar
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f = np.clip((v - ar[:, None]) / den[:, None], 0.0, 1.0)
+    na_janela = (js[None, :] >= -meia[:, None]) & (js[None, :] < meia[:, None])
+    ar_sobra = np.where(na_janela, 1.0 - f, 0.0).sum(axis=1)
+    novo = (K - s * (meia + 0.5) + s * ar_sobra) * esp[k] - off[k]
+    tol = PUREZA_DA_REFERENCIA * den
+    # GUARDA: referencia que nao e plato puro, ou borda longe do cruzamento, fica no cruzamento linear.
+    ok = (ar < B.LIMIAR_HU) & (tr >= B.LIMIAR_HU) & (den > CONTRASTE_MIN_HU)
+    ok &= np.abs(v[linhas, ia - 1] - ar) <= tol
+    ok &= np.abs(v[linhas, ib + 1] - tr) <= tol
+    ok &= np.abs(novo - pts[:, k]) <= 0.5 * (np.asarray(w) + 1.0) * esp[k]
+    return novo, ok
+
+
+def _pele_por_volume_parcial(J, h, serie, off, pts, k, s):
+    g = np.empty_like(pts)
+    for ax in range(3):
+        e = np.zeros(3)
+        e[ax] = h
+        g[:, ax] = _amostrar(J, pts + e, h) - _amostrar(J, pts - e, h)
+    w = larguras_da_transicao(g, serie.esp)
+    wk = w[:, k]
+    fica = np.isfinite(wk) & (wk <= np.maximum(
+        LARGURA_BOA_DA_TRANSICAO, FOLGA_DA_MELHOR_LARGURA * w.min(axis=1)))
+    pts, wk = pts[fica], wk[fica]
+    for i in range(0, len(pts), BLOCO_DA_PELE):
+        bloco = pts[i:i + BLOCO_DA_PELE]
+        novo, ok = borda_por_volume_parcial(serie.hu, serie.esp, off, bloco,
+                                            k, s, wk[i:i + BLOCO_DA_PELE])
+        bloco[ok, k] = novo[ok]
+    return pts
+
+
+def pontos_da_pele(J, corpo, h, serie=None, off=None):
     fora = []
     for eixo in range(3):
         a = [slice(None)] * 3
@@ -628,8 +721,8 @@ def pontos_da_pele(J, corpo, h):
         a[eixo], b[eixo] = slice(0, -1), slice(1, None)
         a, b = tuple(a), tuple(b)
         Ja, Jb = J[a], J[b]
-        for de_dentro, ja_m, jb_m in ((corpo[a] & (Jb < 0), Ja, Jb),
-                                      (corpo[b] & (Ja < 0), Jb, Ja)):
+        for de_dentro, ja_m, jb_m, s in ((corpo[a] & (Jb < 0), Ja, Jb, -1),
+                                         (corpo[b] & (Ja < 0), Jb, Ja, 1)):
             idx = np.nonzero(de_dentro)
             if not idx[0].size:
                 continue
@@ -641,7 +734,11 @@ def pontos_da_pele(J, corpo, h):
                 zyx[:, eixo] += 1.0
                 t = -t
             zyx[:, eixo] += t
-            fora.append(zyx[:, ::-1] * h)
+            pts = zyx[:, ::-1] * h
+            if serie is not None:
+                pts = _pele_por_volume_parcial(J, h, serie, off, pts,
+                                               2 - eixo, s)
+            fora.append(pts)
     if not fora:
         return np.zeros((0, 3))
     return np.concatenate(fora)
@@ -678,19 +775,291 @@ def _refinar_na_pele(perfil, us, v, au, an, av, sn, h, arvore, d):
     return np.where(ok, novo, perfil), ok
 
 
-def tracar_canais(dist, J, lo, hi, h, an, sn, au, P, arvore=None):
+def causas_do_trajeto(tem, m, bloq_m, du):
+    tem = np.asarray(tem, dtype=bool)
+    m = np.asarray(m)
+    bloq_m = np.asarray(bloq_m, dtype=bool)
+    sem_pele = ~tem
+    topo = tem & (m == 0)
+    objeto = tem & (m > 0) & bloq_m
+    invalido = sem_pele | topo | objeto
+    meio = len(tem) // 2
+    passos = {"sem_pele_passos": int(sem_pele.sum()),
+              "topo_passos": int(topo.sum()),
+              "objeto_passos": int(objeto.sum()),
+              "validos_passos": int((~invalido).sum()),
+              "inicio_passos": int(invalido[:meio].sum()),
+              "fim_passos": int(invalido[meio:].sum()),
+              "sem_pele_inicio_passos": int(sem_pele[:meio].sum()),
+              "sem_pele_fim_passos": int(sem_pele[meio:].sum())}
+    passos.update({
+        "sem_pele_mm": passos["sem_pele_passos"] * float(du),
+        "topo_mm": passos["topo_passos"] * float(du),
+        "objeto_mm": passos["objeto_passos"] * float(du),
+        "invalido_mm": int(invalido.sum()) * float(du),
+        "inicio_mm": passos["inicio_passos"] * float(du),
+        "fim_mm": passos["fim_passos"] * float(du),
+        "sem_pele_inicio_mm": passos["sem_pele_inicio_passos"] * float(du),
+        "sem_pele_fim_mm": passos["sem_pele_fim_passos"] * float(du)})
+    return passos
+
+
+def _mm_para_fora(v):
+    return int(math.ceil(float(v) - 1e-9)) if v > 0 else 0
+
+
+def frase_das_causas(c, au, alvo_mm):
+    partes = []
+    if c.get("sem_pele_mm", 0) > 0:
+        lado0, lado1 = LADOS[int(au)]
+        a = _mm_para_fora(c["sem_pele_inicio_mm"])
+        b = _mm_para_fora(c["sem_pele_fim_mm"])
+        lados = [u"%d mm do lado %s" % (mm, lado)
+                 for mm, lado in ((a, lado0), (b, lado1)) if mm]
+        partes.append(u"falta pele sob o canal, dentro da faixa da caixa, em "
+                      u"%d mm do trajeto (%s)" % (a + b, u" e ".join(lados)))
+    if c.get("topo_mm", 0) > 0:
+        partes.append(u"em %d mm a pele já está a menos de %s mm do topo da "
+                      u"caixa: a caixa entra no corpo ou não sai da pele o "
+                      u"bastante" % (_mm_para_fora(c["topo_mm"]),
+                                     _mm(alvo_mm)))
+    if c.get("objeto_mm", 0) > 0:
+        partes.append(u"em %d mm há outro objeto acima da pele (mesa, apoio "
+                      u"ou máscara) no caminho do canal"
+                      % _mm_para_fora(c["objeto_mm"]))
+    return u"; ".join(partes)
+
+
+def _descarte_do_trajeto(k, v, tem, m, bloq_m, du, au, alvo_mm):
+    c = causas_do_trajeto(tem, m, bloq_m, du)
+    c.update({"k": int(k), "v_mm": float(v), "causa": "trajeto",
+              "motivo": frase_das_causas(c, au, alvo_mm)})
+    return c
+
+
+def _melhor_descartado(descartados, n):
+    centro = (n - 1) / 2.0
+    return min(descartados, key=lambda x: (round(x.get("invalido_mm", 0.0), 6),
+                                           abs(x.get("k", 0) - centro),
+                                           x.get("k", 0)))
+
+
+def _propostas_do_descarte(x, direcao, au, alvo_mm):
+    if x.get("causa") == "refino":
+        return [u"Confira na prévia se a pele sob a caixa está inteira e mude "
+                u"a caixa, ou troque a direção dos canais."]
+    if x.get("causa") == "inclinacao":
+        return [u"Troque a direção dos canais, ou mude a caixa para uma região "
+                u"em que a pele incline menos."]
+    lado0, lado1 = LADOS[int(au)]
+    lados = [l for l, mm in ((lado0, x.get("sem_pele_inicio_mm", 0)),
+                             (lado1, x.get("sem_pele_fim_mm", 0))) if mm > 0]
+    onde = (u"do lado %s" % lados[0]) if len(lados) == 1 else (
+        u"dos dois lados (%s e %s)" % (lado0, lado1))
+    cada = [
+        (x.get("sem_pele_mm", 0),
+         u"Encurte a caixa na direção dos canais, %s, para a pele ficar sob "
+         u"todo o trajeto: o canal tem o comprimento da caixa e sai pelas "
+         u"duas faces. Ou troque a direção dos canais." % onde),
+        (x.get("topo_mm", 0),
+         u"Afaste da pele a face %s da caixa: o topo da caixa precisa ficar a "
+         u"mais de %s mm da pele em todo o trajeto."
+         % (DIRECAO_POR_EXTENSO.get(direcao, direcao), _mm(alvo_mm))),
+        (x.get("objeto_mm", 0),
+         u"Um objeto acima da pele barra o canal, e o app não o ignora: a "
+         u"peça pede uma TC sem o objeto na região, ou o objeto recortado "
+         u"(decisão clínica)."),
+    ]
+    cada = [c for c in cada if c[0] > 0]
+    cada.sort(key=lambda c: -c[0])
+    return [c[1] for c in cada]
+
+
+def frase_da_sugerida(sug):
+    return (u"Caixa sugerida: %s mm na direção %s, em vez dos %s mm "
+            u"desenhados, com %d %s nessa direção. Ela deixa de cobrir %s mm "
+            u"da região desenhada: confira se o alvo continua dentro antes de "
+            u"usá-la. A caixa só muda com o clique em «Usar a caixa "
+            u"sugerida», e o aplicador só sai quando você gerar de novo." % (
+                _mm(sug["mm"], 0), nome_do_eixo(sug["eixo_canal"]),
+                _mm(sug["mm_desenhada"], 0), sug["canais"],
+                u"canal" if sug["canais"] == 1 else u"canais",
+                _mm(sug["mm_desenhada"] - sug["mm"], 0)))
+
+
+def com_sugerida(e, outros=(), sugerida=None):
+    det = dict(getattr(e, "detalhe", None) or {})
+    resumo = det.get("resumo") or str(e)
+    for o in outros or ():
+        resumo += (u" Direção dos canais automática: na %s também não coube "
+                   u"canal." % nome_do_eixo(o))
+    propostas = list(det.get("propostas") or [])
+    if sugerida and sugerida.get("descartada"):
+        propostas.append(SUGERIDA_DESCARTADA)
+        det["sugerida_descartada"] = {
+            "colocacao": sugerida["colocacao"],
+            "colocacao_na_sugerida": sugerida["colocacao_na_sugerida"],
+            "sugerida_mm": float(sugerida["mm"]),
+            "sugerida_eixo": int(sugerida["eixo_canal"])}
+    elif sugerida:
+        propostas.append(frase_da_sugerida(sugerida))
+        det.update({"caixa_sugerida": dict(sugerida["caixa"]),
+                    "sugerida_mm": float(sugerida["mm"]),
+                    "sugerida_canais": int(sugerida["canais"]),
+                    "sugerida_eixo": int(sugerida["eixo_canal"])})
+    det.update({"resumo": resumo, "propostas": propostas})
+    return Bloqueio(u" ".join([resumo] + propostas), det,
+                    getattr(e, "campo", None))
+
+
+def recusa_sem_canal(descartados, n, direcao, dir_auto, au, av, alvo_mm,
+                     comprimento_mm):
+    lado0, lado1 = LADOS[int(av)]
+    cab = (u"Nenhum canal coube na caixa. Colocação %s (%s), canais na "
+           u"direção %s: %d tentados." % (
+               DIRECAO_POR_EXTENSO.get(direcao, direcao),
+               u"escolhida pelo app" if dir_auto
+               else u"escolhida no formulário", nome_do_eixo(au), n))
+    if not descartados:
+        resumo = cab
+        return Bloqueio(resumo, {"motivo": "nenhum_canal", "resumo": resumo,
+                                 "propostas": [], "canais_tentados": n})
+    x = _melhor_descartado(descartados, n)
+    quem = u"O melhor, o canal %d (contados do lado %s para o lado %s)" % (
+        x["k"] + 1, lado0, lado1)
+    a = _mm_para_fora(x.get("sem_pele_inicio_mm", 0))
+    b = _mm_para_fora(x.get("sem_pele_fim_mm", 0))
+    causas = {"sem_pele": a + b,
+              "topo": _mm_para_fora(x.get("topo_mm", 0)),
+              "objeto": _mm_para_fora(x.get("objeto_mm", 0)),
+              "lado_inicio": a, "lado_fim": b}
+    if x.get("causa") == "trajeto":
+        comp = int(round(float(comprimento_mm)))
+        falta = causas["sem_pele"] + causas["topo"] + causas["objeto"]
+        corpo = u"%s, tem pele sob %d dos %d mm do trajeto; %s." % (
+            quem, max(0, comp - falta), comp, x["motivo"])
+    else:
+        corpo = u"%s, tem pele sob todo o trajeto, mas %s." % (quem,
+                                                              x["motivo"])
+    resumo = cab + u" " + corpo
+    propostas = _propostas_do_descarte(x, direcao, au, alvo_mm)
+    return Bloqueio(
+        resumo + u" " + u" ".join(propostas),
+        {"motivo": "nenhum_canal", "resumo": resumo, "propostas": propostas,
+         "colocacao": direcao, "colocacao_automatica": bool(dir_auto),
+         "eixo_canal": int(au), "canais_tentados": int(n),
+         "melhor_canal": int(x["k"]) + 1, "causa": x.get("causa"),
+         "causas_mm": causas,
+         "descartados": [dict(d) for d in descartados]})
+
+
+def _lista_de_canais(ks):
+    ks = sorted(int(k) + 1 for k in ks)
+    if len(ks) == 1:
+        return u"o canal %d" % ks[0]
+    if len(ks) > 2 and ks[-1] - ks[0] == len(ks) - 1:
+        return u"os canais %d a %d" % (ks[0], ks[-1])
+    return u"os canais %s e %d" % (u", ".join(u"%d" % k for k in ks[:-1]),
+                                   ks[-1])
+
+
+def recusa_canal_no_meio(canais, descartados, n, direcao, au, av, alvo_mm,
+                         comprimento_mm):
+    aceitos = sorted(int(c["k"]) for c in canais)
+    if len(aceitos) < 2:
+        return None
+    meio = sorted([x for x in descartados
+                   if aceitos[0] < int(x.get("k", -1)) < aceitos[-1]],
+                  key=lambda x: int(x["k"]))
+    if not meio:
+        return None
+    lado0, lado1 = LADOS[int(av)]
+    plural = len(meio) > 1
+    x = meio[len(meio) // 2]
+    cab = (u"Buraco no meio do aplicador: %s (dos %d tentados, contados do "
+           u"lado %s para o lado %s) não %s, e há canais aceitos dos dois "
+           u"lados (%s). O aplicador não é gerado: só com os canais das "
+           u"bordas, o centro da área ficaria sem cateter, e isso é risco de "
+           u"subcobertura do alvo." % (
+               _lista_de_canais([m["k"] for m in meio]), n, lado0, lado1,
+               u"couberam" if plural else u"coube", _lista_de_canais(aceitos)))
+    quem = u"O canal %d%s" % (x["k"] + 1,
+                              u", no meio do buraco," if plural else u"")
+    if x.get("causa") == "trajeto":
+        comp = int(round(float(comprimento_mm)))
+        falta = (_mm_para_fora(x.get("sem_pele_inicio_mm", 0))
+                 + _mm_para_fora(x.get("sem_pele_fim_mm", 0))
+                 + _mm_para_fora(x.get("topo_mm", 0))
+                 + _mm_para_fora(x.get("objeto_mm", 0)))
+        corpo = u"%s tem pele sob %d dos %d mm do trajeto; %s." % (
+            quem, max(0, comp - falta), comp, x["motivo"])
+    else:
+        corpo = u"%s tem pele sob todo o trajeto, mas %s." % (quem,
+                                                             x["motivo"])
+    resumo = cab + u" " + corpo
+    propostas = _propostas_do_descarte(x, direcao, au, alvo_mm)
+    return Bloqueio(
+        resumo + u" " + u" ".join(propostas),
+        {"motivo": "canal_no_meio", "resumo": resumo, "propostas": propostas,
+         "canais_no_meio": [int(m["k"]) + 1 for m in meio],
+         "canais_aceitos": [k + 1 for k in aceitos],
+         "canal_citado": int(x["k"]) + 1, "causa": x.get("causa"),
+         "canais_tentados": int(n),
+         "descartados": [dict(d) for d in descartados]})
+
+
+def trecho_exigido(i0, i1, u0, u1, du, P):
+    if P["trajeto"] != "cego":
+        return i0, i1
+    fundo = P["raio_mm"] + FUNDO_CEGO_PAREDE_MM
+    if P["entrada"] == "inicio":
+        n = int(math.floor((u1 - fundo - u0) / du + 1e-9)) + 1
+        return i0, max(i0 + 1, min(i1, i0 + n))
+    n = int(math.ceil(fundo / du - 1e-9))
+    return min(i1 - 1, max(i0, i0 + n)), i1
+
+
+def _sem_ingreme(valido, D, m, ns, alvo, du):
+    fora = valido.copy()
+    w = np.concatenate([[False], valido, [False]]).astype(np.int8)
+    d = np.diff(w)
+    for a, b in zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]):
+        if b - a < 3:
+            continue
+        mm, m0 = m[a:b], np.maximum(m[a:b] - 1, 0)
+        k = np.arange(b - a)
+        D0, D1 = D[a:b][k, m0], D[a:b][k, mm]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(np.abs(D0 - D1) > 1e-9, (D0 - alvo) / (D0 - D1), 0.0)
+        p = ns[m0] + np.clip(t, 0.0, 1.0) * (ns[mm] - ns[m0])
+        p = _suavizar(p, SUAVE_DA_LINHA_MM / max(du, 1e-6))
+        incl = np.degrees(np.arctan(np.abs(np.gradient(p, du))))
+        fora[a:b] &= incl <= INCLINACAO_MAX_GRAUS
+    return fora
+
+
+def canais_possiveis(lo, hi, h, an, au, P):
+    av = 3 - an - au
+    larg_v = (hi[av] - lo[av]) * h
+    util = larg_v - 2.0 * (P["raio_funil_mm"] + _compensacao(h, P["raio_mm"])
+                           + PAREDE_MIN_MM)
+    if util < 0:
+        return 0, larg_v
+    return int(math.floor(util / P["espacamento_mm"] + 1e-9)) + 1, larg_v
+
+
+def tracar_canais(dist, J, lo, hi, h, an, sn, au, P, arvore=None,
+                  validade=None):
     av = 3 - an - au
     r, r_f = P["raio_mm"], P["raio_funil_mm"]
     d, s = P["distancia_mm"], P["espacamento_mm"]
     alvo = d + 0.5 * h
-    larg_v = (hi[av] - lo[av]) * h
-    util = larg_v - 2.0 * (r_f + _compensacao(h, r) + PAREDE_MIN_MM)
-    if util < 0:
+    n, larg_v = canais_possiveis(lo, hi, h, an, au, P)
+    if n < 1:
         raise B.Recusa(
             u"Caixa estreita demais para um canal: %s mm na direção entre os "
             u"canais, e um canal com parede pede %s mm. Alargue a caixa."
             % (_mm(larg_v), _mm(2.0 * (r_f + PAREDE_MIN_MM))))
-    n = int(math.floor(util / s + 1e-9)) + 1
     vs = [lo[av] * h + larg_v / 2.0 + (k - (n - 1) / 2.0) * s
           for k in range(n)]
     u0, u1 = lo[au] * h, hi[au] * h
@@ -704,6 +1073,7 @@ def tracar_canais(dist, J, lo, hi, h, an, sn, au, P, arvore=None):
     us = np.concatenate([u0 - du * np.arange(ne, 0, -1), us_caixa,
                          u1 + du * np.arange(1, nd + 1)])
     i0, i1 = ne, ne + nu
+    q0, q1 = trecho_exigido(i0, i1, u0, u1, du, P)
     n0, n1 = lo[an] * h, hi[an] * h
     passo_n = min(PASSO_DO_PERFIL_MM, h / 2.0)
     nn = int(math.ceil((n1 - n0) / passo_n)) + 1
@@ -723,17 +1093,15 @@ def tracar_canais(dist, J, lo, hi, h, an, sn, au, P, arvore=None):
         m = np.argmax(abaixo, axis=1)
         bloq = np.maximum.accumulate(Jv >= 0, axis=1)
         linhas = np.arange(len(us))
-        valido = tem & (m > 0) & ~bloq[linhas, m]
-        if not valido[i0:i1].all():
-            falta = int((~valido[i0:i1]).sum())
-            descartados.append({
-                "v_mm": float(v),
-                "motivo": u"a pele não está sob o canal em %d mm do trajeto "
-                          u"(fora do corpo, sob outro objeto, ou a caixa não "
-                          u"sai da pele o bastante)"
-                          % max(1, int(math.ceil(falta * du)))})
+        bloq_m = bloq[linhas, m]
+        valido = tem & (m > 0) & ~bloq_m
+        if validade is not None:
+            validade.append(_sem_ingreme(valido, D, m, ns, alvo, du)[i0:i1])
+        if not valido[q0:q1].all():
+            descartados.append(_descarte_do_trajeto(
+                k, v, tem[q0:q1], m[q0:q1], bloq_m[q0:q1], du, au, alvo))
             continue
-        a, b = i0, i1 - 1
+        a, b = q0, q1 - 1
         while a > 0 and valido[a - 1]:
             a -= 1
         while b < len(us) - 1 and valido[b + 1]:
@@ -749,31 +1117,40 @@ def tracar_canais(dist, J, lo, hi, h, an, sn, au, P, arvore=None):
         if arvore is not None:
             perfil, achou = _refinar_na_pele(perfil, us[sel], v, au, an, av,
                                              sn, h, arvore, d)
-            falha = ~achou[i0 - a:i1 - a]
+            falha = ~achou[q0 - a:q1 - a]
             if (falha.mean() > FALHA_DO_REFINO_MAX
                     or _maior_sequencia(falha) * du > FALHA_DO_REFINO_MAX_MM):
+                nao = int(falha.sum()) * du
                 descartados.append({
-                    "v_mm": float(v),
+                    "k": int(k), "v_mm": float(v), "causa": "refino",
+                    "invalido_mm": float(nao),
                     "motivo": u"a pele medida não confirmou a distância em "
-                              u"%d mm do trajeto" % max(1, int(math.ceil(int(
-                                  (~achou[i0 - a:i1 - a]).sum()) * du)))})
+                              u"%d mm do trajeto" % max(1, _mm_para_fora(nao))})
                 continue
             if not achou.all():
                 ok = np.nonzero(achou)[0]
                 perfil = np.interp(np.arange(len(perfil)), ok, perfil[ok])
         perfil = _suavizar(perfil, SUAVE_DA_LINHA_MM / max(du, 1e-6))
-        perfil = perfil[i0 - a:i1 - a]
-        incl = np.degrees(np.arctan(np.abs(np.gradient(perfil, du))))
+        antes, depois = max(0, a - i0), max(0, i1 - 1 - b)
+        if antes or depois:
+            # GUARDA: alem do fundo cego nao ha canal; a linha so precisa cobrir a caixa.
+            perfil = np.concatenate([np.full(antes, perfil[0]), perfil,
+                                     np.full(depois, perfil[-1])])
+        base = min(a, i0)
+        perfil = perfil[i0 - base:i1 - base]
+        incl = np.degrees(np.arctan(np.abs(np.gradient(perfil, du))))[
+            q0 - i0:q1 - i0]
         if float(incl.max()) > INCLINACAO_MAX_GRAUS:
             descartados.append({
-                "v_mm": float(v),
+                "k": int(k), "v_mm": float(v), "causa": "inclinacao",
+                "invalido_mm": 0.0, "graus": float(incl.max()),
                 "motivo": u"o canal desceria quase na vertical (%.0f°; o "
                           u"limite é %.0f°)" % (float(incl.max()),
                                                  INCLINACAO_MAX_GRAUS)})
             continue
         linha = np.empty((nu, 3))
         linha[:, au], linha[:, an], linha[:, av] = us_caixa, perfil, v
-        canais.append({"v_mm": float(v), "linha": linha})
+        canais.append({"k": int(k), "v_mm": float(v), "linha": linha})
     return canais, descartados, av
 
 
@@ -961,22 +1338,17 @@ def _aberto(F, canais, h, P, au):
     return obstruido, fundo_aberto
 
 
-def gerar(serie, caixa, parametros=None):
-    t0 = time.time()
-    P = conferir_parametros(parametros)
-    cx = B.normalizar_caixa(serie, caixa)
+def _campos(serie, cx, P, colocacao=None):
+    from scipy.spatial import cKDTree
     T = P["corpo_mm"]
     h, off, forma = B._grade(serie, cx,
                              max(T + 2.0, 2.0 * SUAVE_DA_LINHA_MM + 1.0))
     J, corpo, lo, hi, direcao, dir_auto, av_mesa = B.campos_da_pele(
         serie, cx, h, off, forma, P["direcao"])
-    an, sn = B._NORMAL[direcao]
-    au = eixo_do_canal(P["eixo"], direcao)
-    face_entrada = face_de_entrada(au, P["entrada"])
-    avisos = list(av_mesa) + list(P["alertas"])
-
-    from scipy.spatial import cKDTree
-    pele = pontos_da_pele(J, corpo, h)
+    if colocacao and direcao != colocacao:
+        raise ColocacaoVirou(direcao)
+    eixos = eixos_do_canal(P["eixo"], direcao)
+    pele = pontos_da_pele(J, corpo, h, serie, off)
     if not len(pele):
         raise B.Recusa(u"Não achei pele na caixa: ela não encosta no corpo "
                        u"na direção de colocação.")
@@ -993,15 +1365,194 @@ def gerar(serie, caixa, parametros=None):
     if not (F < 0).any():
         raise B.Recusa(u"Não sobrou corpo: a caixa não encosta na pele na "
                        u"direção de colocação, ou tudo nela é sólido.")
+    return {"h": h, "off": off, "forma": forma, "lo": lo, "hi": hi,
+            "direcao": direcao, "dir_auto": dir_auto, "avisos_mesa": av_mesa,
+            "eixos": eixos, "J": J, "dist": dist, "arvore": arvore, "F": F}
 
-    canais, descartados, av = tracar_canais(dist, J, lo, hi, h, an, sn, au, P,
-                                            arvore)
-    del J
-    if not canais:
-        raise B.Recusa(
-            u"Nenhum canal coube na caixa: %s. Mude a caixa para a pele ficar "
-            u"sob todo o trajeto, ou troque a direção dos canais."
-            % (descartados[0]["motivo"] if descartados else u"caixa vazia"))
+
+def comprimento_exigido(u0, u1, P):
+    if P["trajeto"] == "cego":
+        return u1 - u0 - (P["raio_mm"] + FUNDO_CEGO_PAREDE_MM)
+    return u1 - u0
+
+
+def _tracar_eixos(ctx, P):
+    an, sn = B._NORMAL[ctx["direcao"]]
+    h = ctx["h"]
+    alvo = P["distancia_mm"] + 0.5 * h
+    fora = []
+    for au in ctx["eixos"]:
+        maximo = canais_possiveis(ctx["lo"], ctx["hi"], h, an, au, P)[0]
+        comp = comprimento_exigido(ctx["lo"][au] * h, ctx["hi"][au] * h, P)
+        if fora and maximo and fora[0]["uteis"] >= maximo:
+            fora.append({"au": au, "av": 3 - an - au, "canais": [],
+                         "descartados": [], "tentados": 0, "buraco": None,
+                         "estreita": None, "validade": [], "comprimento": comp,
+                         "uteis": 0, "maximo": maximo, "pulado": True})
+            continue
+        validade, estreita = [], None
+        try:
+            canais, descartados, av = tracar_canais(
+                ctx["dist"], ctx["J"], ctx["lo"], ctx["hi"], h, an, sn, au, P,
+                ctx["arvore"], validade)
+        except B.Recusa as e:
+            if len(ctx["eixos"]) < 2:
+                raise
+            canais, descartados, av, estreita = [], [], 3 - an - au, e
+        tentados = len(canais) + len(descartados)
+        buraco = recusa_canal_no_meio(canais, descartados, tentados,
+                                      ctx["direcao"], au, av, alvo,
+                                      comp) if canais else None
+        fora.append({"au": au, "av": av, "canais": canais,
+                     "descartados": descartados, "tentados": tentados,
+                     "buraco": buraco, "estreita": estreita,
+                     "validade": validade, "comprimento": comp,
+                     "uteis": (len(canais) if buraco is None
+                               and estreita is None else 0),
+                     "maximo": maximo, "pulado": False})
+    return fora
+
+
+def escolher_eixo(tracados):
+    if all(t["estreita"] is not None for t in tracados):
+        raise tracados[0]["estreita"]
+    return max(tracados, key=lambda t: (t["uteis"], t is tracados[0]))
+
+
+def _o_que_coube(t):
+    if t.get("pulado"):
+        return u"caberiam no máximo %d" % t["maximo"]
+    if t["uteis"]:
+        return u"couberam %d" % t["uteis"]
+    return u"nenhum canal útil"
+
+
+def frase_do_eixo_escolhido(escolha, tracados):
+    outros = u"; ".join(
+        u"na %s, %s" % (nome_do_eixo(t["au"]), _o_que_coube(t))
+        for t in tracados if t is not escolha)
+    return (u"Direção dos canais escolhida pelo app: %s, com %d %s; %s." % (
+        nome_do_eixo(escolha["au"]), escolha["uteis"],
+        u"canal" if escolha["uteis"] == 1 else u"canais", outros))
+
+
+def _maior_trecho(w):
+    w = np.concatenate([[False], np.asarray(w, dtype=bool), [False]])
+    d = np.diff(w.astype(np.int8))
+    ini, fim = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+    if not ini.size:
+        return 0, 0
+    j = int(np.argmax(fim - ini))
+    return int(ini[j]), int(fim[j])
+
+
+def intervalo_com_canais(validade, du, minimo_mm):
+    V = np.asarray(validade, dtype=bool)
+    if V.ndim != 2 or not V.size:
+        return None
+    n = V.shape[0]
+    melhor = None
+    for k0 in range(n):
+        W = np.ones(V.shape[1], dtype=bool)
+        for k1 in range(k0, n):
+            W &= V[k1]
+            a, b = _maior_trecho(W)
+            comp = (b - 1 - a) * du
+            if b <= a or comp < minimo_mm:
+                break
+            ks = np.nonzero(V[:, a:b].all(axis=1))[0]
+            # GUARDA: canal caido entre canais aceitos e o buraco que a geracao recusa.
+            if not ks.size or ks[-1] - ks[0] + 1 != ks.size:
+                continue
+            nota = (ks.size * comp, comp)
+            if melhor is None or nota > melhor[0]:
+                melhor = (nota, a, b, int(ks.size))
+    return melhor
+
+
+def caixa_sugerida(serie, cx, P, ctx, tracados):
+    h, off, lo, hi = ctx["h"], ctx["off"], ctx["lo"], ctx["hi"]
+    margem = MARGEM_DA_SUGERIDA_MM
+    melhor = None
+    for t in tracados:
+        if t["estreita"] is not None or not t["validade"]:
+            continue
+        au = t["au"]
+        u0, u1 = lo[au] * h, hi[au] * h
+        nu = len(t["validade"][0])
+        du = (u1 - u0) / max(1, nu - 1)
+        iv = intervalo_com_canais(t["validade"], du,
+                                  B.CAIXA_MIN_MM + 2.0 * margem)
+        if iv is None:
+            continue
+        nota, a, b, _n = iv
+        ua = u0 + a * du + (margem if a > 0 else 0.0)
+        ub = u0 + (b - 1) * du - (margem if b < nu else 0.0)
+        if ub - ua < B.CAIXA_MIN_MM or ub - ua >= u1 - u0 - 1e-6:
+            continue
+        if melhor is None or nota > melhor[0]:
+            melhor = (nota, au, ua, ub, u1 - u0)
+    if melhor is None:
+        return None
+    _nota, au, ua, ub, desenhada = melhor
+    eixo = "xyz"[au]
+    cx2 = dict(cx)
+    cx2[eixo + "0"] = float(off[au] + ua)
+    cx2[eixo + "1"] = float(off[au] + ub)
+    # GUARDA: confere so o eixo aparado; com o eixo automatico, a geracao fica com o que der mais.
+    P2 = dict(P, eixo=dict((e[1], e[0]) for e in EIXOS)[au])
+    try:
+        tr2 = _tracar_eixos(_campos(serie, cx2, P2, ctx["direcao"]), P2)
+    except ColocacaoVirou as v:
+        # GUARDA: a sugestao promete a colocacao desta geracao; com outra, seria outro aplicador.
+        return {"descartada": True, "caixa": cx2, "mm": float(ub - ua),
+                "mm_desenhada": float(desenhada), "eixo_canal": int(au),
+                "colocacao": ctx["direcao"],
+                "colocacao_na_sugerida": v.direcao}
+    except B.Recusa:
+        return None
+    if tr2[0]["uteis"] < 1:
+        return None
+    return {"caixa": cx2, "mm": float(ub - ua), "mm_desenhada": float(desenhada),
+            "canais": int(tr2[0]["uteis"]), "eixo_canal": int(au)}
+
+
+def _recusa_sem_uteis(serie, cx, P, ctx, tracados):
+    rel = tracados[0] if tracados[0]["estreita"] is None else next(
+        t for t in tracados if t["estreita"] is None)
+    e = rel["buraco"] or recusa_sem_canal(
+        rel["descartados"], rel["tentados"], ctx["direcao"], ctx["dir_auto"],
+        rel["au"], rel["av"], P["distancia_mm"] + 0.5 * ctx["h"],
+        rel["comprimento"])
+    for k in ("J", "dist", "arvore", "F"):
+        ctx.pop(k, None)
+    return com_sugerida(e, [t["au"] for t in tracados if t is not rel],
+                        caixa_sugerida(serie, cx, P, ctx, tracados))
+
+
+def gerar(serie, caixa, parametros=None):
+    t0 = time.time()
+    P = conferir_parametros(parametros)
+    cx = B.normalizar_caixa(serie, caixa)
+    T = P["corpo_mm"]
+    ctx = _campos(serie, cx, P)
+    h, off, forma, lo, hi = (ctx["h"], ctx["off"], ctx["forma"], ctx["lo"],
+                             ctx["hi"])
+    direcao, dir_auto = ctx["direcao"], ctx["dir_auto"]
+    an, sn = B._NORMAL[direcao]
+    avisos = list(ctx["avisos_mesa"]) + list(P["alertas"])
+    tracados = _tracar_eixos(ctx, P)
+    escolha = escolher_eixo(tracados)
+    if not escolha["uteis"]:
+        raise _recusa_sem_uteis(serie, cx, P, ctx, tracados)
+    dist, arvore, F = ctx.pop("dist"), ctx.pop("arvore"), ctx.pop("F")
+    del ctx["J"]
+    au, av = escolha["au"], escolha["av"]
+    canais, descartados = escolha["canais"], escolha["descartados"]
+    tentados = escolha["tentados"]
+    face_entrada = face_de_entrada(au, P["entrada"])
+    if len(tracados) > 1:
+        avisos.append(frase_do_eixo_escolhido(escolha, tracados))
     u0, u1 = lo[au] * h, hi[au] * h
     for c in canais:
         _montar_canal(c, P, au, u0, u1, h)
@@ -1058,7 +1609,10 @@ def gerar(serie, caixa, parametros=None):
                       u"suavizada onde a pele faz curva." % (
                           _mm(pele_min), _mm(pele_max), _mm(d)))
     for x in descartados:
-        avisos.append(u"Um canal não coube e ficou fora: %s." % x["motivo"])
+        avisos.append(u"Um canal não coube e ficou fora (o %dº dos %d "
+                      u"tentados, contados do lado %s): %s."
+                      % (x.get("k", 0) + 1, tentados, LADOS[int(av)][0],
+                         x["motivo"]))
     del dist
 
     F = _cavar(F, canais, h)
@@ -1145,6 +1699,11 @@ def gerar(serie, caixa, parametros=None):
         "peca": "aplicador", "parametros": publicos,
         "direcao": direcao, "direcao_automatica": dir_auto,
         "eixo_canal": int(au), "eixo_canal_nome": nome_do_eixo(au),
+        "eixo_canal_automatico": len(tracados) > 1,
+        "eixos_tracados": [{"eixo": int(t["au"]),
+                            "nome": nome_do_eixo(t["au"]),
+                            "canais": int(t["uteis"]),
+                            "tracado": not t["pulado"]} for t in tracados],
         "face_entrada": face_entrada,
         "eixo_espacamento": int(av), "grade_mm": h, "caixa": cx,
         "off": off.tolist(), "forma": list(forma),
@@ -1236,7 +1795,9 @@ def linhas_de_parametros(res):
          if P["funil"] else u"não"),
         (u"Direção de colocação", DIRECAO_POR_EXTENSO.get(res["direcao"],
                                                           res["direcao"])),
-        (u"Direção dos canais", res["eixo_canal_nome"]),
+        (u"Direção dos canais", res["eixo_canal_nome"] + (
+            u" (escolhida pelo app)" if res.get("eixo_canal_automatico")
+            else u"")),
     ]
 
 

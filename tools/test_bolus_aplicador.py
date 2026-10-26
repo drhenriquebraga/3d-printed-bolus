@@ -168,6 +168,11 @@ def teste_padroes_e_menus():
     checar(u"e que a janela de exibição não muda a pele usada, com a janela "
            u"da TC de Bellis (1 a 2 mm)",
            u"só mudam a exibição" in sup and u"1 a 2 mm" in sup)
+    checar(u"e que a distância e a curva do canal seguem a borda do volume "
+           u"parcial, e só a face interna o cruzamento do limiar",
+           u"curva do canal seguem a borda medida pelo volume parcial" in sup
+           and u"face interna da peça segue o ponto" in sup
+           and u"face interna da peça e a distância" not in sup, sup[:200])
     checar(u"(isca) a janela saiu do «?» da distância, que não fala mais dela",
            u"janela" not in u" ".join(A.AJUDA["distancia"]))
     mat = u" ".join(A.AJUDA["material"])
@@ -387,17 +392,24 @@ def teste_pele_subvoxel(s):
     h, off, forma = B._grade(s, cxn, 12.0)
     J, corpo, lo, hi, d, _a, _av = B.campos_da_pele(s, cxn, h, off, forma,
                                                     "ant")
-    pts = A.pontos_da_pele(J, corpo, h)
-    lps = s.quadro_para_lps(off[None, :] + pts)
-    perto = np.abs(lps[:, 2]) < 25
-    rr = np.sqrt(lps[perto, 0] ** 2 + lps[perto, 1] ** 2)
-    anterior = lps[perto, 1] < -60
-    checar(u"%d pontos da pele na frente, a %.2f ± %.3f mm do eixo (80 mm, "
-           u"menos o meio voxel do limiar)" % (anterior.sum(),
-                                               rr[anterior].mean(),
-                                               rr[anterior].std()),
-           anterior.sum() > 1000 and abs(rr[anterior].mean() - 79.8) < 0.3
-           and rr[anterior].std() < 0.12)
+    def raios(pts):
+        lps = s.quadro_para_lps(off[None, :] + pts)
+        perto = np.abs(lps[:, 2]) < 25
+        r = np.sqrt(lps[perto, 0] ** 2 + lps[perto, 1] ** 2)
+        return r[lps[perto, 1] < -60]
+
+    rr = raios(A.pontos_da_pele(J, corpo, h, s, off))
+    checar(u"%d pontos da pele na frente, a %.3f ± %.3f mm do eixo (80 mm): "
+           u"a borda sai do volume parcial dos voxels do cruzamento"
+           % (len(rr), rr.mean(), rr.std()),
+           len(rr) > 1000 and abs(rr.mean() - 80.0) < 0.05
+           and rr.std() < 0.05, (len(rr), rr.mean(), rr.std()))
+    linear = raios(A.pontos_da_pele(J, corpo, h))
+    checar(u"(isca) o cruzamento linear do limiar, o método de antes, põe a "
+           u"pele %.2f mm para dentro e espalha %.3f mm"
+           % (80.0 - linear.mean(), linear.std()),
+           80.0 - linear.mean() > 0.15 and linear.std() > 2 * rr.std(),
+           (linear.mean(), linear.std()))
     from scipy import ndimage
     borda = corpo & ~ndimage.binary_erosion(corpo)
     zz, yy, xx = np.nonzero(borda)
@@ -405,7 +417,15 @@ def teste_pele_subvoxel(s):
     ok = (np.abs(lb[:, 2]) < 25) & (lb[:, 1] < -60)
     rb = np.sqrt(lb[ok, 0] ** 2 + lb[ok, 1] ** 2)
     checar(u"(isca) a borda da máscara voxelizada espalha %.3f mm — mais que "
-           u"o dobro" % rb.std(), rb.std() > 2 * rr[anterior].std())
+           u"o dobro" % rb.std(), rb.std() > 2 * rr.std())
+    larg = A.larguras_da_transicao(np.array([[0.0, 0.0, 1.0],
+                                             [0.0, 0.8, 0.6]]),
+                                   np.array([1.0, 1.0, 3.0]))
+    checar(u"a largura da transição em amostras: 1 com a pele de frente para "
+           u"o eixo; o corte de 3 mm é o eixo bom da pele inclinada "
+           u"(%.2f contra %.2f)" % (larg[1, 2], larg[1, 1]),
+           abs(larg[0, 2] - 1.0) < 1e-9 and np.isinf(larg[0, 0])
+           and larg[1, 2] < larg[1, 1], larg)
 
 
 def teste_gerar_cilindro(s):
@@ -746,6 +766,11 @@ def teste_descartados(s):
            len(r["canais"]) >= 1 and len(r["descartados"]) >= 1
            and any(u"não coube" in a for a in r["avisos"]),
            (len(r["canais"]), r["descartados"]))
+    fora = [a for a in r["avisos"] if u"não coube" in a]
+    checar(u"o aviso do canal descartado diz a causa separada (falta pele, "
+           u"e de que lado), e não as três numa frase só",
+           fora and all(u"falta pele" in a and u"do lado" in a
+                        and MOTIVO_ANTIGO not in a for a in fora), fora[:1])
     longe = caixa(s, (90, -105, -20), (105, -95, 20))
     e = recusa(A.gerar, s, longe, {"eixo": "cc", "direcao": "ant"})
     checar(u"caixa longe da pele: recusa dizendo por quê",
@@ -754,6 +779,626 @@ def teste_descartados(s):
                {"eixo": "ap", "direcao": "ant"})
     checar(u"canais na direção da colocação: recusa",
            e is not None and u"direção" in str(e), e)
+
+
+def domo_rampa(R=65.0, esp=(1.2, 1.2, 2.0)):
+    xs = np.arange(-200.0, -10.0 + 1e-6, esp[0])
+    ys = np.arange(-90.0, 90.0 + 1e-6, esp[1])
+    zs = np.arange(-110.0, 50.0 + 1e-6, esp[2])
+    Z, Y, X = np.meshgrid(zs, ys, xs, indexing="ij")
+    xc = np.clip(X, -170.0, 170.0)
+    sd = np.sqrt((X - xc) ** 2 + Y ** 2 + (Z + R) ** 2) - R
+    sd = np.minimum(sd, np.maximum(np.abs(Y) - R, Z + R))
+    frac = np.clip(0.5 - sd / min(esp), 0.0, 1.0)
+    img = sitk.GetImageFromArray((-1000.0 + 1040.0 * frac).astype(np.int16))
+    img.SetSpacing(tuple(float(e) for e in esp))
+    img.SetOrigin((float(xs[0]), float(ys[0]), float(zs[0])))
+    return img
+
+
+def domo(R=65.0, esp=(1.0, 1.0, 2.0), passo=0.05):
+    xs = np.arange(-200.0, -10.0 + 1e-6, esp[0])
+    ys = np.arange(-90.0, 90.0 + 1e-6, esp[1])
+    zs = np.arange(-110.0, 50.0 + 1e-6, esp[2])
+    Z, Y = np.meshgrid(zs, ys, indexing="ij")
+    ny = max(3, int(round(esp[1] / passo)) | 1)
+    nz = max(3, int(round(esp[2] / passo)) | 1)
+    frac = np.zeros(Z.shape)
+    for dz in ((np.arange(nz) + 0.5) / nz - 0.5) * esp[2]:
+        for dy in ((np.arange(ny) + 0.5) / ny - 0.5) * esp[1]:
+            yy, zz = Y + dy, Z + dz
+            sd = np.minimum(np.sqrt(yy ** 2 + (zz + R) ** 2) - R,
+                            np.maximum(np.abs(yy) - R, zz + R))
+            frac += sd < 0
+    frac /= ny * nz
+    vol = np.empty((len(zs), len(ys), len(xs)), dtype=np.int16)
+    vol[...] = np.round(-1000.0 + 1040.0 * frac).astype(np.int16)[:, :, None]
+    vol[:, :, xs < -170.0] = -1000
+    img = sitk.GetImageFromArray(vol)
+    img.SetSpacing(tuple(float(e) for e in esp))
+    img.SetOrigin((float(xs[0]), float(ys[0]), float(zs[0])))
+    return img
+
+
+def teste_borda_por_volume_parcial():
+    secao(u"a borda pelo volume parcial: a fase do voxel não mexe na pele")
+    esp = np.array([1.0, 1.0, 3.0])
+    zs = np.arange(20) * esp[2]
+    erro_vp, erro_lin = [], []
+    for e in np.linspace(30.0, 33.0, 31):
+        occ = np.clip((e - (zs - esp[2] / 2.0)) / esp[2], 0.0, 1.0)
+        col = np.round(-1000.0 + 1040.0 * occ)
+        hu = np.empty((len(zs), 3, 3), dtype=np.int16)
+        hu[...] = col.astype(np.int16)[:, None, None]
+        j = int(np.nonzero((col[:-1] >= B.LIMIAR_HU)
+                           & (col[1:] < B.LIMIAR_HU))[0][0])
+        z_lin = zs[j] + (col[j] - B.LIMIAR_HU) / (col[j] - col[j + 1]) * esp[2]
+        novo, ok = A.borda_por_volume_parcial(
+            hu, esp, np.zeros(3), np.array([[1.0, 1.0, z_lin]]), 2, -1,
+            np.array([1.0]))
+        erro_vp.append(novo[0] - e if ok[0] else np.inf)
+        erro_lin.append(z_lin - e)
+    erro_vp, erro_lin = np.array(erro_vp), np.array(erro_lin)
+    checar(u"corte de 3 mm, a borda em 31 fases do voxel: o volume parcial "
+           u"acerta em todas (erro máximo %.3f mm)" % np.abs(erro_vp).max(),
+           np.abs(erro_vp).max() < 0.01, erro_vp)
+    checar(u"(isca) o cruzamento linear do limiar oscila %.2f mm de pico a "
+           u"pico com a fase, o tamanho do erro que apertava a curva"
+           % (erro_lin.max() - erro_lin.min()),
+           erro_lin.max() - erro_lin.min() > 0.4, erro_lin)
+    occ = np.clip((31.4 - (zs - esp[2] / 2.0)) / esp[2], 0.0, 1.0)
+    col = -1000.0 + 1040.0 * occ
+    col[occ >= 1.0] = np.where(np.arange(int((occ >= 1.0).sum())) % 2, 40.0,
+                               -300.0)
+    hu = np.empty((len(zs), 3, 3), dtype=np.int16)
+    hu[...] = np.round(col).astype(np.int16)[:, None, None]
+    _novo, ok = A.borda_por_volume_parcial(
+        hu, esp, np.zeros(3), np.array([[1.0, 1.0, 31.0]]), 2, -1,
+        np.array([1.0]))
+    checar(u"tecido que não é um platô sob a pele: a borda fica no "
+           u"cruzamento linear, e não vai para longe", not ok[0], ok)
+
+
+def teste_raio_no_domo():
+    secao(u"o raio medido sobre um domo de 65 mm, com corte de 1, 2 e 3 mm")
+    geometrico = 65.0 + A.DISTANCIA_PADRAO_MM
+    par = {"eixo": "ap", "direcao": "sup",
+           "afterloader": "microselectron_digital"}
+    original = A.pontos_da_pele
+
+    def so_linear(J, corpo, h, serie=None, off=None):
+        return original(J, corpo, h)
+
+    medidos, antigos = [], []
+    for esp in ((1.0, 1.0, 1.0), (1.0, 1.0, 2.0), (1.0, 1.0, 3.0)):
+        s = B.abrir(domo(esp=esp), "CT")
+        cx = caixa(s, (-150.0, -35.0, -40.0), (-80.0, 35.0, 31.0))
+        medidos.append(A.gerar(s, cx, par)["raio_min_mm"])
+        A.pontos_da_pele = so_linear
+        try:
+            antigos.append(A.gerar(s, cx, par)["raio_min_mm"])
+        finally:
+            A.pontos_da_pele = original
+        print(u"         · corte de %g mm: raio mínimo %.1f mm (com o "
+              u"cruzamento linear de antes, %.1f), geométrico %.0f"
+              % (esp[2], medidos[-1], antigos[-1], geometrico))
+    checar(u"o erro cai para poucos por cento nos três cortes (%s mm contra "
+           u"%.0f; até 5%% abaixo)" % (u", ".join(u"%.1f" % m for m in medidos),
+                                      geometrico),
+           all(m >= 0.95 * geometrico for m in medidos), medidos)
+    checar(u"e continua do lado seguro: o raio medido nunca passa do "
+           u"geométrico", all(m <= 1.01 * geometrico for m in medidos),
+           medidos)
+    checar(u"(isca) com o cruzamento linear de antes, o mesmo domo dava %s "
+           u"mm: 9 a 30%% abaixo, pior no corte grosso"
+           % u", ".join(u"%.1f" % m for m in antigos),
+           all(m < 0.95 * geometrico for m in antigos)
+           and antigos[2] < 0.8 * geometrico, antigos)
+    s = B.abrir(domo_rampa(esp=(1.2, 1.2, 2.0)), "CT")
+    r = A.gerar(s, caixa(s, (-150.0, -35.0, -40.0), (-80.0, 35.0, 31.0)), par)
+    checar(u"borda mais fina que o corte (1,2 mm num corte de 2 mm, que a TC "
+           u"não grava): o raio %.1f mm ainda só erra para o lado seguro"
+           % r["raio_min_mm"], r["raio_min_mm"] <= 1.01 * geometrico,
+           r["raio_min_mm"])
+    fechadas = []
+    for esp in ((1.0, 1.0, 1.0), (1.0, 1.0, 2.0), (1.0, 1.0, 3.0)):
+        s = B.abrir(domo(R=8.0, esp=esp), "CT")
+        e = recusa(A.gerar, s, caixa(s, (-150.0, -6.0, -16.0),
+                                     (-80.0, 6.0, 14.0)), par)
+        fechadas.append(e.detalhe.get("raio_min_mm")
+                        if isinstance(e, A.Bloqueio) and e.detalhe.get(
+                            "motivo") == "raio_abaixo_do_piso" else None)
+    checar(u"uma curva fechada de verdade (crista de 8 mm, canal com ~13 mm, "
+           u"6F com piso de 15) continua bloqueada nos três cortes (%s mm)"
+           % u", ".join(u"%.1f" % m if m is not None else u"GEROU"
+                        for m in fechadas),
+           all(m is not None and m < 15.0 for m in fechadas), fechadas)
+    t = np.linspace(-0.5, 0.5, 400)
+    arco = np.stack([np.zeros_like(t), 70.0 * np.sin(t),
+                     70.0 * np.cos(t)], 1)
+    dente = arco.copy()
+    dente[:, 2] -= 0.15 * np.exp(-0.5 * (70.0 * t / 5.0) ** 2)
+    liso = A.raios_de_curvatura(arco)[0]
+    com = A.raios_de_curvatura(dente)[0]
+    checar(u"(isca) um afundamento de 0,15 mm num arco de 70 mm, o tamanho "
+           u"do erro de fase, já baixa o raio medido para %.0f mm"
+           % np.nanmin(com[np.isfinite(com)]),
+           abs(np.nanmin(liso[np.isfinite(liso)]) - 70.0) < 0.7
+           and np.nanmin(com[np.isfinite(com)]) < 0.9 * 70.0)
+
+
+def cilindro_com_entalhe(R=80.0, esp=(1.0, 1.0, 2.0),
+                         meia=(110.0, 110.0, 70.0), entalhe_x=12.0,
+                         entalhe_z=18.0, L=40.0):
+    nx, ny, nz = [int(round(2 * meia[i] / esp[i])) + 1 for i in range(3)]
+    x = (np.arange(nx) - (nx - 1) / 2.0) * esp[0]
+    y = (np.arange(ny) - (ny - 1) / 2.0) * esp[1]
+    z = (np.arange(nz) - (nz - 1) / 2.0) * esp[2]
+    Z, Y, X = np.meshgrid(z, y, x, indexing="ij")
+    comprimento = np.where(np.abs(X) <= entalhe_x, entalhe_z, L)
+    sd = np.maximum(np.sqrt(X ** 2 + Y ** 2) - R, np.abs(Z) - comprimento)
+    frac = np.clip(0.5 - sd / min(esp), 0.0, 1.0)
+    img = sitk.GetImageFromArray((-1000.0 + 1020.0 * frac).astype(np.int16))
+    img.SetSpacing(tuple(float(e) for e in esp))
+    img.SetOrigin((float(x[0]), float(y[0]), float(z[0])))
+    return img
+
+
+def teste_buraco_no_meio():
+    secao(u"canal que cai no meio, com canais aceitos dos dois lados: não "
+          u"gera")
+    s = B.abrir(cilindro_com_entalhe(), "CT")
+    e = recusa(A.gerar, s, caixa(s, (-30, -105, -30), (30, -60, 30)),
+               {"eixo": "cc", "direcao": "ant"})
+    det = getattr(e, "detalhe", {}) or {}
+    texto = str(e) if e is not None else u""
+    print(u"         · %s" % (det.get("resumo") or texto)[:300])
+    checar(u"o entalhe sob os canais do meio: Bloqueio próprio, e não um "
+           u"aplicador com buraco central e só um aviso",
+           isinstance(e, A.Bloqueio) and det.get("motivo") == "canal_no_meio",
+           texto[:200])
+    checar(u"diz quais canais caíram (3 e 4 de 6) e que há aceitos dos dois "
+           u"lados (1, 2, 5 e 6)",
+           det.get("canais_no_meio") == [3, 4]
+           and det.get("canais_aceitos") == [1, 2, 5, 6]
+           and u"os canais 3 e 4 (dos 6 tentados" in texto
+           and u"aceitos dos dois lados (os canais 1, 2, 5 e 6)" in texto,
+           (det.get("canais_no_meio"), det.get("canais_aceitos")))
+    checar(u"diz por quê: falta pele sob o canal citado, com os mm e os "
+           u"lados, e o risco de subcobertura do alvo",
+           det.get("canal_citado") in (3, 4) and u"falta pele sob o canal"
+           in texto and u"do lado inferior" in texto and u"do lado superior"
+           in texto and u"subcobertura do alvo" in texto, texto[:400])
+    checar(u"propõe encurtar a caixa na direção dos canais",
+           (det.get("propostas") or [u""])[0].startswith(
+               u"Encurte a caixa na direção dos canais"),
+           det.get("propostas"))
+    r = A.gerar(s, caixa(s, (-8, -105, -30), (32, -60, 30)),
+                {"eixo": "cc", "direcao": "ant"})
+    fora = [a for a in r["avisos"] if u"não coube" in a]
+    checar(u"(isca) o mesmo entalhe na borda da caixa: gera %d canais, e os "
+           u"%d que caíram na borda ficam como aviso" % (len(r["canais"]),
+                                                         len(fora)),
+           len(r["canais"]) >= 1 and len(fora) >= 1, (len(r["canais"]),
+                                                      fora[:1]))
+    um = {"k": 2, "causa": "inclinacao", "invalido_mm": 0.0,
+          "motivo": u"o canal desceria quase na vertical (75°; o limite é "
+                    u"70°)"}
+    b = A.recusa_canal_no_meio([{"k": 0}, {"k": 1}, {"k": 3}], [um], 4, "ant",
+                               2, 0, 5.4, 60.0)
+    checar(u"qualquer causa no meio bloqueia, e um canal só no singular",
+           isinstance(b, A.Bloqueio) and b.detalhe.get("canais_no_meio") == [3]
+           and u"o canal 3 (dos 4 tentados" in str(b) and u"não coube"
+           in str(b) and u"desceria quase na vertical" in str(b), str(b)[:200])
+    checar(u"(isca) canal caído só na borda, ou um canal aceito só: não "
+           u"bloqueia",
+           A.recusa_canal_no_meio([{"k": 2}, {"k": 3}], [dict(um, k=0)], 4,
+                                  "ant", 2, 0, 5.4, 60.0) is None
+           and A.recusa_canal_no_meio([{"k": 1}], [dict(um, k=0),
+                                                   dict(um, k=2)], 3, "ant",
+                                      2, 0, 5.4, 60.0) is None)
+
+
+def teste_os_dois_eixos(s):
+    secao(u"direção dos canais automática: os dois eixos, e fica o que dá "
+          u"mais canais")
+    cx = caixa(s, (-20, -105, -35), (20, -60, 35))
+    r = A.gerar(s, cx, {"eixo": "auto", "direcao": "ant"})
+    rc = A.gerar(s, cx, {"eixo": "cc", "direcao": "ant"})
+    checar(u"caixa estreita em x e longa em z: a automática traça os dois e "
+           u"fica com a laterolateral (%d canais contra %d)"
+           % (len(r["canais"]), len(rc["canais"])),
+           r["eixo_canal"] == 0 and len(r["canais"]) > len(rc["canais"])
+           and [t["eixo"] for t in r["eixos_tracados"]] == [2, 0]
+           and all(t["tracado"] for t in r["eixos_tracados"]),
+           r["eixos_tracados"])
+    checar(u"  (isca) a regra fixa de antes (craniocaudal) dava menos canais "
+           u"na mesma caixa", rc["eixo_canal"] == 2 and len(rc["canais"]) == 4,
+           len(rc["canais"]))
+    av = [a for a in r["avisos"] if a.startswith(u"Direção dos canais")]
+    checar(u"  e diz qual escolheu, e quanto coube no outro",
+           av == [u"Direção dos canais escolhida pelo app: laterolateral "
+                  u"(direita–esquerda), com %d canais; na craniocaudal, "
+                  u"couberam 4." % len(r["canais"])], av)
+    par = dict(A.linhas_de_parametros(r))
+    checar(u"  a ficha diz que a direção foi escolhida pelo app",
+           par.get(u"Direção dos canais") == u"laterolateral "
+           u"(direita–esquerda) (escolhida pelo app)", par.get(u"Direção dos canais"))
+    checar(u"a direção escolhida no formulário é respeitada, sem aviso de "
+           u"escolha", not [a for a in rc["avisos"]
+                            if a.startswith(u"Direção dos canais")]
+           and dict(A.linhas_de_parametros(rc)).get(u"Direção dos canais")
+           == u"craniocaudal")
+    q = caixa(s, (-30, -105, -30), (30, -60, 30))
+    ra = A.gerar(s, q, {"eixo": "auto", "direcao": "ant"})
+    rq = A.gerar(s, q, {"eixo": "cc", "direcao": "ant"})
+    checar(u"caixa quadrada: o padrão já dá todos os canais que o outro "
+           u"caberia, e o outro nem é traçado (o mesmo STL do padrão)",
+           ra["stl"] == rq["stl"] and ra["eixos_tracados"][1]["tracado"] is False
+           and u"caberiam no máximo 6" in u" ".join(ra["avisos"]),
+           ra["eixos_tracados"])
+
+
+def teste_fundo_cego_sem_pele_alem_do_fundo(s):
+    secao(u"fundo cego: não exige pele além do fundo, onde não há cateter")
+    P = {"trajeto": "cego", "entrada": "inicio", "raio_mm": 1.5}
+    checar(u"no aberto, o trecho exigido é a caixa inteira",
+           A.trecho_exigido(10, 410, 0.0, 100.0, 0.25,
+                            dict(P, trajeto="aberto")) == (10, 410))
+    checar(u"no cego com entrada no início, ele para no fundo (raio + 2 mm "
+           u"antes da face oposta)",
+           A.trecho_exigido(10, 411, 0.0, 100.0, 0.25, P) == (10, 397))
+    checar(u"no cego com entrada no fim, ele começa no fundo",
+           A.trecho_exigido(10, 411, 0.0, 100.0, 0.25,
+                            dict(P, entrada="fim")) == (24, 411))
+    cx = caixa(s, (-15, -105, -30), (15, -60, 86))
+    e = recusa(A.gerar, s, cx, {"eixo": "cc", "direcao": "ant"})
+    checar(u"a caixa passa do fim do cilindro: no aberto, nenhum canal cabe "
+           u"(o canal sai pela face sem pele embaixo)",
+           isinstance(e, A.Bloqueio) and e.detalhe.get("motivo")
+           == "nenhum_canal", str(e)[:160])
+    par = {"eixo": "cc", "direcao": "ant", "trajeto": "cego",
+           "entrada": "inicio"}
+    r = A.gerar(s, cx, par)
+    checar(u"no cego, os canais cabem: o trecho sem pele fica além do fundo "
+           u"(%d canais, malha fechada, fundo fechado)" % len(r["canais"]),
+           len(r["canais"]) == 3 and r["malha"]["fechada"] and r["pecas"] == 1,
+           (len(r["canais"]), r["malha"]["fechada"]))
+    lin = linhas_lps(s, r)
+    fundo = lin[0][-1]
+    alem = fundo + np.array([0, 0, A.FUNDO_CEGO_PAREDE_MM / 2.0
+                             + r["parametros"]["raio_mm"]])
+    checar(u"  e além do fundo há parede (a conferência da malha continua)",
+           bool(B.dentro_da_malha(tri_lps(r["stl"]), np.array([alem]))[0]))
+    original = A.trecho_exigido
+    A.trecho_exigido = lambda i0, i1, *a: (i0, i1)
+    try:
+        e2 = recusa(A.gerar, s, cx, par)
+    finally:
+        A.trecho_exigido = original
+    checar(u"  (isca) exigindo pele na caixa inteira, como antes, o mesmo "
+           u"cego seria recusado", isinstance(e2, A.Bloqueio)
+           and e2.detalhe.get("motivo") == "nenhum_canal", str(e2)[:160])
+
+
+def _funcao_js(js, nome):
+    i = js.find(u"function %s(" % nome)
+    if i < 0:
+        return u""
+    k, prof = js.find(u"{", i), 0
+    for j in range(k, len(js)):
+        if js[j] == u"{":
+            prof += 1
+        elif js[j] == u"}":
+            prof -= 1
+            if prof == 0:
+                return js[i:j + 1]
+    return u""
+
+
+_HARNESS_SUGERIDA = u"""
+var NOS = {};
+function no(id){ var n = {id: id, filhos: [], classList: {add: function(){},
+  remove: function(){}}, textContent: '', parentNode: null,
+  appendChild: function(c){ c.parentNode = this; this.filhos.push(c) },
+  removeChild: function(c){ this.filhos.splice(this.filhos.indexOf(c), 1); c.parentNode = null }};
+  return n }
+function el(id){ return NOS[id] || (NOS[id] = no(id)) }
+var document = {createElement: function(){ return no('') }};
+var window = {RETRAD: 0, radaiRetraduzir: function(){ window.RETRAD++ }};
+function escreve(a, t){ a.textContent = t }
+function aviso(a, t, c){ var p = no(''); p.textContent = t; a.appendChild(p) }
+function tremerCampo(){}
+var DESENHOS = 0;
+function desenharCaixas(){ DESENHOS++ }
+function desenharE(){ DESENHOS++ }
+var BO = {caixa: {x0: 1, x1: 2, y0: 3, y1: 4, z0: 5, z1: 6}};
+var D = %s;
+mostrarBloqueio(D);
+var antes = JSON.stringify(BO.caixa);
+var bt = el('bo-avisos').filhos.filter(function(f){ return f.id === 'bo-ap-sugerida' })[0];
+var tinha = !!bt, rot = bt ? bt.textContent : '';
+var LINHAS = el('bo-avisos').filhos.map(function(f){ return f.textContent });
+var RETRAD = window.RETRAD;
+if(bt) bt.onclick();
+console.log('JSON:' + JSON.stringify({antes: antes, depois: BO.caixa, tinha: tinha,
+  rotulo: rot, linhas: LINHAS, retrad: RETRAD, retrad_clique: window.RETRAD - RETRAD,
+  estado: el('bo-estado').textContent, desenhos: DESENHOS,
+  sobrou: el('bo-avisos').filhos.filter(function(f){ return f.id === 'bo-ap-sugerida' }).length}));
+"""
+
+
+def _sugerida_no_node(js, d):
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        return None
+    fn = u"\n".join(_funcao_js(js, n) for n in ("mostrarBloqueio",
+                                                "botaoDaSugerida"))
+    arq = os.path.join(_cleanup.temporaria("radai_teste_sugerida_js_"), "t.js")
+    io.open(arq, "w", encoding="utf-8").write(
+        fn + _HARNESS_SUGERIDA % json.dumps(d, ensure_ascii=False))
+    p = subprocess.run([node, arq], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=60)
+    for ln in reversed((p.stdout or u"").splitlines()):
+        if ln.startswith(u"JSON:"):
+            return json.loads(ln[5:])
+    return {"erro": (p.stderr or u"")[-300:]}
+
+
+def teste_caixa_sugerida(s):
+    secao(u"nenhum canal na caixa inteira: a caixa aparada onde eles cabem, "
+          u"proposta e nunca aplicada")
+    V = np.ones((5, 40), dtype=bool)
+    V[:, :6] = False
+    V[2, 30:] = False
+    iv = A.intervalo_com_canais(V, 1.0, 10.0)
+    checar(u"o intervalo fica com os cinco canais onde todos têm pele, e não "
+           u"com o trecho em que o do meio cai (%s)" % (iv,),
+           iv is not None and iv[1:] == (6, 30, 5), iv)
+    W = np.ones((5, 40), dtype=bool)
+    W[2, :] = False
+    checar(u"  canal do meio sem pele em lugar nenhum: sem sugestão (seria "
+           u"o buraco que a geração recusa)",
+           A.intervalo_com_canais(W, 1.0, 10.0) is None)
+    curto = np.ones((3, 40), dtype=bool)
+    curto[:, 8:] = False
+    checar(u"  e o trecho menor que o mínimo não vira sugestão",
+           A.intervalo_com_canais(curto, 1.0, 10.0) is None
+           and A.intervalo_com_canais(curto, 1.0, 7.0) is not None)
+    lo, hi = (-15, -105, -30), (15, -60, 95)
+    cx = caixa(s, lo, hi)
+    par = {"eixo": "cc", "direcao": "ant"}
+    e = recusa(A.gerar, s, cx, par)
+    det = getattr(e, "detalhe", {}) or {}
+    sug = det.get("caixa_sugerida") or {}
+    print(u"         · %s" % ((det.get("propostas") or [u""])[-1])[:300])
+    cxn = B.normalizar_caixa(s, cx)
+    checar(u"a recusa continua recusa, e leva a caixa sugerida",
+           isinstance(e, A.Bloqueio) and det.get("motivo") == "nenhum_canal"
+           and sug, str(e)[:200])
+    checar(u"  aparada só na direção dos canais (z), dentro da desenhada",
+           sug and all(abs(sug[k] - cxn[k]) < 1e-6 for k in
+                       ("x0", "x1", "y0", "y1"))
+           and abs(sug["z0"] - cxn["z0"]) < 1e-6 and sug["z1"] < cxn["z1"] - 5,
+           (sug, cxn))
+    checar(u"  e a última proposta, logo antes do botão, diz quanto deixa de "
+           u"cobrir e que a caixa só muda com o clique",
+           (det.get("propostas") or [u""])[-1].startswith(u"Caixa sugerida:")
+           and u"deixa de cobrir" in det["propostas"][-1]
+           and u"«Usar a caixa sugerida»" in det["propostas"][-1]
+           and det["propostas"][0].startswith(u"Encurte a caixa"),
+           det.get("propostas"))
+    r = A.gerar(s, sug, par) if sug else None
+    checar(u"na caixa sugerida, o aplicador sai com os canais que ela "
+           u"prometeu (%s)" % (len(r["canais"]) if r else None),
+           r is not None and len(r["canais"]) == det.get("sugerida_canais")
+           and r["malha"]["fechada"], det.get("sugerida_canais"))
+    original = A.caixa_sugerida
+    A.caixa_sugerida = lambda *a, **k: None
+    try:
+        e0 = recusa(A.gerar, s, cx, par)
+    finally:
+        A.caixa_sugerida = original
+    checar(u"  (isca) sem a sugestão, a recusa não traz caixa nenhuma",
+           isinstance(e0, A.Bloqueio)
+           and "caixa_sugerida" not in (e0.detalhe or {}), str(e0)[:120])
+    import radai_bolus_screen as T
+    d = {"erro": str(e), "bloqueio": A._json(det)}
+    o = _sugerida_no_node(T.JS, d)
+    if o is None:
+        print(u"         · node ausente: o botão NÃO foi medido")
+        return
+    checar(u"a tela mostra «Usar a caixa sugerida», e a caixa NÃO muda "
+           u"sozinha ao mostrar a recusa",
+           o.get("tinha") and o.get("rotulo") == u"Usar a caixa sugerida"
+           and json.loads(o.get("antes") or "{}") == {"x0": 1, "x1": 2, "y0": 3,
+                                                     "y1": 4, "z0": 5, "z1": 6},
+           str(o)[:300])
+    checar(u"  só o clique troca a caixa pela sugerida, redesenha e diz para "
+           u"conferir o alvo e gerar de novo",
+           o.get("depois") == {k: float(sug[k]) for k in sug}
+           and o.get("desenhos") == 2 and o.get("sobrou") == 0
+           and u"confira se o alvo continua dentro" in (o.get("estado") or u""),
+           str(o)[:300])
+    checar(u"  e a recusa e o clique pedem a tradução do que escreveram (o "
+           u"botão e o aviso saem nos doze idiomas)",
+           o.get("retrad") == 1 and o.get("retrad_clique") == 1,
+           (o.get("retrad"), o.get("retrad_clique")))
+    o2 = _sugerida_no_node(T.JS, {"erro": str(e0), "bloqueio": A._json(e0.detalhe)})
+    checar(u"  (isca) recusa sem sugestão: nenhum botão",
+           o2 is not None and o2.get("tinha") is False, str(o2)[:200])
+
+
+def teste_a_sugerida_que_vira_a_colocacao_e_dita(s):
+    secao(u"a caixa aparada em que a colocação automática viraria: sai, e a "
+          u"tela diz numa linha")
+    cx = caixa(s, (-15, -105, -30), (15, -60, 95))
+    par = {"eixo": "cc", "direcao": "auto"}
+    e_auto = recusa(A.gerar, s, cx, par)
+    det_a = getattr(e_auto, "detalhe", {}) or {}
+    checar(u"na colocação automática que não vira, a sugestão continua "
+           u"(sem a linha do descarte)",
+           det_a.get("colocacao_automatica") and det_a.get("caixa_sugerida")
+           and A.SUGERIDA_DESCARTADA not in (det_a.get("propostas") or [])
+           and "sugerida_descartada" not in det_a, str(e_auto)[:200])
+    real = B.direcao_automatica
+    vistas = []
+
+    def vira(solido, lo, hi):
+        d = real(solido, lo, hi)
+        vistas.append(d)
+        return d if len(vistas) == 1 else (u"esq" if d != u"esq" else u"dir")
+    B.direcao_automatica = vira
+    try:
+        e = recusa(A.gerar, s, cx, par)
+    finally:
+        B.direcao_automatica = real
+    det = getattr(e, "detalhe", {}) or {}
+    desc = det.get("sugerida_descartada") or {}
+    prop = det.get("propostas") or []
+    print(u"         · %s" % (prop[-1:] or [u""])[0][:200])
+    checar(u"a recusa continua recusa, sem caixa sugerida e sem botão",
+           isinstance(e, A.Bloqueio) and det.get("motivo") == "nenhum_canal"
+           and "caixa_sugerida" not in det, str(e)[:200])
+    checar(u"  e o descarte fica no detalhe, com a colocação de agora e a que "
+           u"a caixa aparada teria (%s)" % (desc,),
+           desc.get("colocacao") == vistas[0]
+           and desc.get("colocacao_na_sugerida") not in (None, vistas[0])
+           and len(vistas) == 2, (desc, vistas))
+    checar(u"  e a última proposta é a linha que diz o descarte",
+           prop[-1:] == [A.SUGERIDA_DESCARTADA]
+           and A.SUGERIDA_DESCARTADA in str(e), prop[-1:])
+    original = A.caixa_sugerida
+    A.caixa_sugerida = lambda *a, **k: None
+    B.direcao_automatica = vira
+    try:
+        vistas[:] = []
+        e0 = recusa(A.gerar, s, cx, par)
+    finally:
+        A.caixa_sugerida = original
+        B.direcao_automatica = real
+    checar(u"  (isca) com a sugestão sumindo calada, como antes, a linha não "
+           u"está e a checagem acusa",
+           isinstance(e0, A.Bloqueio)
+           and A.SUGERIDA_DESCARTADA not in ((e0.detalhe or {}).get(
+               "propostas") or []), str(e0)[:160])
+    import radai_bolus_screen as T
+    o = _sugerida_no_node(T.JS, {"erro": str(e), "bloqueio": A._json(det)})
+    if o is None:
+        print(u"         · node ausente: a linha na tela NÃO foi medida")
+        return
+    checar(u"a tela mostra a linha do descarte, e nenhum botão",
+           o.get("tinha") is False
+           and A.SUGERIDA_DESCARTADA in (o.get("linhas") or []), str(o)[:300])
+    checar(u"  e pede a tradução do que acabou de escrever (a linha sai nos "
+           u"doze idiomas)", o.get("retrad") == 1, o.get("retrad"))
+    sem_trad = T.JS.replace(
+        u"botaoDaSugerida(av, d.bloqueio.caixa_sugerida);\n"
+        u"  if(window.radaiRetraduzir) window.radaiRetraduzir();",
+        u"botaoDaSugerida(av, d.bloqueio.caixa_sugerida);", 1)
+    oi = _sugerida_no_node(sem_trad, {"erro": str(e), "bloqueio": A._json(det)})
+    checar(u"  (isca) sem o pedido de tradução, a linha ficaria em português "
+           u"em toda língua, e a checagem acusa",
+           sem_trad != T.JS and oi is not None and oi.get("retrad") == 0,
+           str(oi)[:160])
+    o0 = _sugerida_no_node(T.JS, {"erro": str(e0),
+                                  "bloqueio": A._json(e0.detalhe)})
+    checar(u"  (isca) sem o conserto, a tela não tinha linha nem botão",
+           o0 is not None and o0.get("tinha") is False
+           and A.SUGERIDA_DESCARTADA not in (o0.get("linhas") or []),
+           str(o0)[:200])
+
+
+MOTIVO_ANTIGO = (u"fora do corpo, sob outro objeto, ou a caixa não sai da "
+                 u"pele o bastante")
+
+
+def _mensagem_antiga(descartados):
+    if not descartados:
+        return u""
+    motivo = (u"a pele não está sob o canal em %d mm do trajeto (%s)"
+              % (max(1, int(math.ceil(descartados[0]["invalido_mm"]))),
+                 MOTIVO_ANTIGO))
+    return (u"Nenhum canal coube na caixa: %s. Mude a caixa para a pele ficar "
+            u"sob todo o trajeto, ou troque a direção dos canais." % motivo)
+
+
+def _numeros(texto):
+    return [float(x.replace(u",", u".")) for x in
+            re.findall(r"(\d+(?:,\d+)?) mm", texto)]
+
+
+def teste_recusa_diz_por_que(s):
+    secao(u"nenhum canal coube: a colocação, o melhor canal e as causas")
+    c = A.causas_do_trajeto([True, False, False, True, True, True, True,
+                             True], [3, 0, 0, 0, 2, 2, 5, 1],
+                            [False, False, False, False, False, True, True,
+                             False], 0.5)
+    checar(u"as três causas contadas em separado, por passo (sem pele 2, "
+           u"topo 1, objeto 2) e por face (%s)" % c,
+           c["sem_pele_passos"] == 2 and c["topo_passos"] == 1
+           and c["objeto_passos"] == 2 and c["validos_passos"] == 3
+           and c["inicio_passos"] == 3 and c["fim_passos"] == 2
+           and c["sem_pele_inicio_passos"] == 2
+           and c["sem_pele_fim_passos"] == 0, c)
+
+    cx = caixa(s, (-95, -105, -95), (95, -60, -50))
+    e = recusa(A.gerar, s, cx, {"eixo": "ll", "direcao": "ant"})
+    texto = str(e) if e is not None else u""
+    det = getattr(e, "detalhe", {}) or {}
+    print(u"         · %s" % (det.get("resumo") or texto)[:300])
+    checar(u"a caixa que passa da pele: recusa, com o motivo próprio",
+           isinstance(e, A.Bloqueio) and det.get("motivo") == "nenhum_canal",
+           texto[:200])
+    checar(u"diz a colocação e a direção dos canais",
+           u"Colocação anterior (escolhida no formulário)" in texto
+           and u"laterolateral" in texto, texto[:200])
+    checar(u"cita o melhor canal, e não o primeiro: o primeiro não tem pele "
+           u"nenhuma (passa do fim do corpo), os outros têm pele no meio",
+           det.get("melhor_canal") in (2, 3) and det.get("canais_tentados")
+           == 4 and u"o canal %d" % det.get("melhor_canal", 0) in texto,
+           (det.get("melhor_canal"), det.get("canais_tentados")))
+    mm = det.get("causas_mm") or {}
+    checar(u"no melhor canal, ~68 mm sem pele, metade de cada lado, e nada "
+           u"de topo ou objeto (%s)" % mm,
+           60 <= mm.get("sem_pele", 0) <= 76 and mm.get("topo") == 0
+           and mm.get("objeto") == 0
+           and abs(mm.get("lado_inicio", 0) - mm.get("lado_fim", 0)) <= 4, mm)
+    checar(u"diz quanto do trajeto tem pele, e que falta dos dois lados",
+           u"tem pele sob" in texto and u"do lado direita" in texto
+           and u"do lado esquerda" in texto, texto[:300])
+    checar(u"as causas saem separadas, não as três numa frase só",
+           MOTIVO_ANTIGO not in texto and u"topo da caixa" not in
+           det.get("resumo", u""), texto[:300])
+    checar(u"propõe encurtar a caixa na direção dos canais, primeiro",
+           (det.get("propostas") or [u""])[0].startswith(
+               u"Encurte a caixa na direção dos canais"),
+           det.get("propostas"))
+    antiga = _mensagem_antiga(det.get("descartados") or [])
+    checar(u"(isca) a mensagem antiga citava o canal 1, com %s mm, e "
+           u"misturava as causas" % (_numeros(antiga)[:1] or [u"?"])[0],
+           MOTIVO_ANTIGO in antiga and _numeros(antiga)
+           and _numeros(antiga)[0] > 150, antiga[:160])
+
+    cx2 = caixa(s, (-30, -83, -20), (30, -50, 20))
+    e2 = recusa(A.gerar, s, cx2, {"eixo": "ll", "direcao": "ant"})
+    det2 = getattr(e2, "detalhe", {}) or {}
+    mm2 = det2.get("causas_mm") or {}
+    print(u"         · %s" % (det2.get("resumo") or str(e2))[:300])
+    checar(u"a caixa colada na pele: a causa é o topo da caixa (%s)" % mm2,
+           det2.get("motivo") == "nenhum_canal" and mm2.get("topo", 0) >= 30
+           and mm2.get("sem_pele") == 0 and u"topo da caixa"
+           in det2.get("resumo", u""), str(e2)[:200])
+    checar(u"e propõe afastar da pele a face anterior da caixa",
+           (det2.get("propostas") or [u""])[0].startswith(
+               u"Afaste da pele a face anterior da caixa"),
+           det2.get("propostas"))
+    e3 = recusa(A.gerar, s, cx, {"eixo": "ll", "direcao": "auto"})
+    checar(u"na colocação automática, a recusa diz que foi o app que "
+           u"escolheu", e3 is not None and u"(escolhida pelo app)" in str(e3),
+           str(e3)[:200])
 
 
 def teste_ficha_e_pacote(r_verde, r_amarelo):
@@ -1118,6 +1763,14 @@ def main():
     teste_face_de_entrada(s_peq, cx_peq)
     teste_fundo_cego(s)
     teste_descartados(s)
+    teste_recusa_diz_por_que(s)
+    teste_buraco_no_meio()
+    teste_os_dois_eixos(s)
+    teste_fundo_cego_sem_pele_alem_do_fundo(s)
+    teste_caixa_sugerida(s)
+    teste_a_sugerida_que_vira_a_colocacao_e_dita(s)
+    teste_borda_por_volume_parcial()
+    teste_raio_no_domo()
     teste_ficha_e_pacote(r_verde, r_amarelo)
     teste_ato(r_verde, r_amarelo)
     teste_rotas(s, s_peq, cx_peq)

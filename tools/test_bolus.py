@@ -1676,9 +1676,39 @@ def teste_rotas():
     checar(u"o arquivo dos atos mora no acervo ISOLADO da bateria",
            os.path.dirname(T.arquivo_de_atos())
            == os.environ.get("RADAI_CALIB_DIR"), T.arquivo_de_atos())
-    r = cli.post("/api/bolus/series", json={"pasta": base}).json()
-    series = r.get("series") or []
-    checar(u"a pasta lista as duas séries", len(series) == 2, r)
+    import radai_varrer
+    radai_varrer.montar(app)
+    rotas = set(getattr(x, "path", u"") for x in app.routes)
+    checar(u"a aba «Aponte uma pasta» não tem mais POST único próprio",
+           u"/api/bolus/series" not in rotas and u"/api/varrer/iniciar" in rotas,
+           sorted(x for x in rotas if u"series" in x or u"varrer" in x))
+    _escrever_dicom(os.path.join(base, "PAC", "LOCALIZADOR"), "CT", 6,
+                    "ZZSENTINELA^ISCA^LOC")
+    d = cli.post("/api/varrer/iniciar", json={
+        "uso": T.USO_DA_VARREDURA, "pasta": base, "dias": 0}).json()
+    prazo = time.time() + 60.0
+    while not d.get("fim") and time.time() < prazo:
+        time.sleep(0.1)
+        d = cli.post("/api/varrer/estado", json={"v": d.get("v")}).json()
+    r = {"series": d.get("linhas") or []}
+    series = r["series"]
+    checar(u"a pasta lista as duas séries pela varredura da casca, e o "
+           u"localizador de 6 cortes fica de fora (mínimo de %d)" % T.MIN_CORTES,
+           len(series) == 2 and d.get("fim") and not d.get("erro"), d)
+    crua = {"bilhete": u"B", "uid": u"1.2.3", "pid": u"ZZ0001",
+            "descricao": u"ZZSENTINELA", "modalidade": u"CT", "date": u"20240101"}
+    T.linha_do_bolus(crua, u"C:\\fantoma", {"uid": u"1.2.3", "cortes": 40,
+                                            "numero": 3})
+    checar(u"  a linha que vai à tela leva só o bilhete, o rótulo e a recusa",
+           set(crua) == {u"bilhete", u"b", u"rotulo", u"recusada"}
+           and u"ZZ" not in json.dumps(crua), crua)
+    radai_varrer.registrar_series_de_pasta(u"teste_bolus_cru")
+    dc = radai_varrer.iniciar(u"teste_bolus_cru", base, dias=0,
+                              em_segundo_plano=False)
+    cru = radai_varrer.estado(dc.get("v")).get("linhas") or []
+    checar(u"  (isca) sem o enriquecer do bólus, a linha da varredura levaria "
+           u"o ID do paciente", u"ZZ0001" in json.dumps(cru))
+    T._L.pop(u"B", None)
     tc = [x for x in series if not x["recusada"]]
     rm = [x for x in series if x["recusada"]]
     checar(u"a RM vem RECUSADA, com o motivo, e não some",
@@ -2096,7 +2126,7 @@ def teste_traducoes():
     checar(u"(isca) uma frase nova sem chave e fora da lista seria acusada",
            F.normalizar(u"frase nova do molde ZZQ") not in chaves
            and F.normalizar(u"frase nova do molde ZZQ") not in pend)
-    for f in (u"procurando séries…", u"abrindo a série…",
+    for f in (u"informe a pasta", u"abrindo a série…",
               u"gerando o bólus…", u"arraste para girar",
               u"A caixa ou os parâmetros mudaram: gere de novo para exportar.",
               u"espessura mínima", u"espessura mediana", u"espessura máxima",

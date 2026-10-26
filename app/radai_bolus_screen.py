@@ -113,6 +113,36 @@ def lista_para_a_tela(achadas, fazer_bilhete):
 
 
 SERIE_FORA_DO_ACERVO = u"a série não está mais no acervo"
+USO_DA_VARREDURA = "bolus"
+MIN_CORTES = 20
+CAMPOS_DA_LINHA = ("bilhete",)
+
+
+def linha_do_bolus(linha, pasta, s):
+    if int(s.get("cortes") or 0) < MIN_CORTES:
+        return False
+    b = linha.get("bilhete") or u""
+    if not b:
+        return False
+    serie = {"pasta": pasta, "uid": str(s.get("uid") or u""),
+             "modalidade": linha.get("modalidade") or u"",
+             "cortes": int(s.get("cortes") or 0),
+             "numero": s.get("numero"),
+             "espessura_mm": s.get("espessura_mm"),
+             "date": linha.get("date") or u""}
+    f = lista_para_a_tela([serie], lambda _p, _u: b)[0]
+    _L[b] = serie
+    for k in list(linha):
+        if k not in CAMPOS_DA_LINHA:
+            linha.pop(k, None)
+    linha.update(f)
+    return True
+
+
+def registrar_varredura():
+    import radai_varrer
+    return radai_varrer.registrar_series_de_pasta(
+        USO_DA_VARREDURA, enriquecer=linha_do_bolus)
 
 
 def serie_do_acervo(bilhete, resolver=None, detalhes=None):
@@ -160,6 +190,10 @@ CSS = u"""
 .bo-bt2.on{border-color:var(--mod-bolus,#B5D65A);color:var(--mod-bolus,#B5D65A)}
 .bo-msg{font-size:13px;color:var(--text-muted);min-height:18px}
 .bo-serie-l{display:flex;gap:8px;align-items:center}
+.bo-campo-l{display:flex;gap:6px;align-items:stretch}
+.bo-campo-l input{flex:1 1 auto;min-width:0}
+.bo-filtro{margin:10px 0 0}
+#bo-busca{margin:8px 0 0}
 .bo-serie-l select{flex:1 1 auto;min-width:0}
 .bo-msg.erro{color:var(--perigo)}
 .bo-ctl[hidden],.bo-pecas[hidden],.bo-ctl .g[hidden],.bo-ato[hidden]{display:none}
@@ -173,6 +207,7 @@ CSS = u"""
 .bo-ctl .g .bo-info{flex:1 1 auto}
 .bo-aviso.bo-bloq{border-left-color:var(--perigo);color:var(--text)}
 .bo-aviso.bo-exig{border-left-color:var(--mod-bolus,#B5D65A);color:var(--text)}
+.bo-sugerida{align-self:flex-start}
 .bo-tab td.bo-amarela{color:var(--warn,#E1B23B);font-weight:700}
 .bo-janela{max-height:92vh;overflow:auto}
 .bo-janela .bo-tab{margin:2px 0}
@@ -264,9 +299,10 @@ function el(i){ return document.getElementById(i) }
 function escreve(alvo, t){ if(window.uiTexto) window.uiTexto(alvo, t); else alvo.textContent = t }
 var BO = {b:'', meta:null, caixa:null, janela:'pele', idx:{ax:0, co:0, sa:0},
   corpo:null, bolus:null, molde:null, ver:'ambos', peca:'bolus',
-  res:null, r:'', velho:false, gerando:false,
+  res:null, r:'', velho:false, gerando:false, pedido:0,
   cam:{yaw:0, pitch:12, zoom:1}, camB:{yaw:0, pitch:12, zoom:1}, token:{e:0, d:0}};
 var PLANOS = ['ax', 'co', 'sa'];
+var USO_DA_VARREDURA = @USO_JS@;
 var FRASE = @FRASE_JS@;
 var SETA = @SETA_JS@;
 
@@ -287,21 +323,42 @@ el('bo-procurar').onclick = function(){
 };
 el('bo-pasta').addEventListener('keydown', function(ev){ if(ev.key === 'Enter'){ ev.preventDefault(); el('bo-listar').onclick() } });
 el('bo-listar').onclick = function(){
-  msg('procurando séries…');
-  post('/api/bolus/series', {pasta: el('bo-pasta').value}).then(function(d){
-    var s = el('bo-serie'); s.innerHTML = ''; BO.lista = {};
-    (d.series || []).forEach(function(x){
-      var o = document.createElement('option');
-      o.value = x.b; o.textContent = x.rotulo + (x.recusada ? ' — ' + x.recusada : '');
-      o.disabled = !!x.recusada; s.appendChild(o); BO.lista[x.b] = x;
-    });
+  var pasta = (el('bo-pasta').value || '').trim();
+  if(!pasta){
+    msg('informe a pasta', true);
+    if(window.uiTremer) window.uiTremer(el('bo-pasta'));
+    return;
+  }
+  if(!window.uiVarrerLista) return;
+  msg('');
+  el('bo-serie').innerHTML = ''; BO.lista = {}; liberarAbrir();
+  var pedido = ++BO.pedido;
+  window.uiVarrerLista({estado: 'bo-busca', uso: USO_DA_VARREDURA, chave: 'bolus',
+    pasta: pasta, dias: 'bo_dias',
+    pintar: function(linhas){ if(pedido === BO.pedido) boOpcoes(linhas) },
+    aoFim: function(linhas){
+      if(pedido !== BO.pedido) return;
+      boOpcoes(linhas || []);
+      if(!(linhas || []).length) msg('Nenhuma série nesta pasta.', true);
+    },
+    aoErro: function(m){ if(pedido === BO.pedido) msg(m, true) }});
+};
+function boOpcoes(linhas){
+  var s = el('bo-serie');
+  linhas.forEach(function(x){
+    if(!x.b || BO.lista[x.b]) return;
+    var o = document.createElement('option');
+    o.value = x.b; o.textContent = x.rotulo + (x.recusada ? ' — ' + x.recusada : '');
+    o.disabled = !!x.recusada; s.appendChild(o); BO.lista[x.b] = x;
+  });
+  var atual = s.selectedOptions[0];
+  if(!atual || atual.disabled){
     var livre = [].slice.call(s.options).filter(function(o){ return !o.disabled });
     if(livre.length) s.value = livre[0].value;
-    if(window.radaiRetraduzir) window.radaiRetraduzir();
-    liberarAbrir();
-    msg(d.erro || '', !!d.erro);
-  }).catch(function(e){ msg(String(e), true) });
-};
+  }
+  if(window.radaiRetraduzir) window.radaiRetraduzir();
+  liberarAbrir();
+}
 el('bo-serie').onchange = function(){ liberarAbrir() };
 
 function boRotulo(b){
@@ -951,6 +1008,22 @@ function mostrarBloqueio(d){
   if(d.campo) tremerCampo(d.campo);
   var av = el('bo-avisos'); av.innerHTML = '';
   ((d.bloqueio || {}).propostas || []).forEach(function(t){ aviso(av, t, 'bo-bloq') });
+  if((d.bloqueio || {}).caixa_sugerida) botaoDaSugerida(av, d.bloqueio.caixa_sugerida);
+  if(window.radaiRetraduzir) window.radaiRetraduzir();
+}
+function botaoDaSugerida(alvo, sug){
+  var b = document.createElement('button');
+  b.type = 'button'; b.className = 'ui-bt bo-sugerida'; b.id = 'bo-ap-sugerida';
+  escreve(b, 'Usar a caixa sugerida');
+  b.onclick = function(){
+    BO.caixa = {x0: +sug.x0, x1: +sug.x1, y0: +sug.y0, y1: +sug.y1, z0: +sug.z0, z1: +sug.z1};
+    desenharCaixas(); desenharE(1);
+    if(b.parentNode) b.parentNode.removeChild(b);
+    el('bo-estado').classList.remove('erro');
+    escreve(el('bo-estado'), 'A caixa mudou para a sugerida: confira se o alvo continua dentro e gere de novo.');
+    if(window.radaiRetraduzir) window.radaiRetraduzir();
+  };
+  alvo.appendChild(b);
 }
 function mostrarAplicador(d, b){
   BO.res = d; BO.r = d.r; BO.velho = false; BO.molde = null;
@@ -1431,7 +1504,8 @@ def pagina():
                       "@FRASE_JS@", json.dumps(radai_bolus.FRASE_DO_ATO))
                       .replace("@SETA_JS@", json.dumps(
                           radai_ui.icone(u"acima")).replace(u"</", u"<\\/"))
-                      .replace("@AP_JS@", dados_do_aplicador_para_o_js()))
+                      .replace("@AP_JS@", dados_do_aplicador_para_o_js())
+                      .replace("@USO_JS@", json.dumps(USO_DA_VARREDURA)))
                   .replace("@AJ_APLICADOR@", _aj("aplicador"))
                   .replace("@PAINEL_AP@", painel_do_aplicador())
                   .replace("@ALERTA_AP@", _esc(A.ALERTA))
@@ -1455,12 +1529,15 @@ def pagina():
 PASTA_HTML = u"""<div class="bo-linha">
  <div class="bo-campo" style="flex:2"><label for="bo-pasta"
    data-radai-frase>Pasta da tomografia</label>
-  <input id="bo-pasta" type="text" autocomplete="off" spellcheck="false"></div>
+  <div class="bo-campo-l"><input id="bo-pasta" type="text" autocomplete="off"
+   spellcheck="false">@FAV@</div></div>
  <button id="bo-procurar" class="ui-bt" type="button">@ICO_PASTA@<span
   data-radai-frase>Procurar&hellip;</span></button>
  <button id="bo-listar" class="bo-bt2" type="button"
   data-radai-frase>Procurar s&eacute;ries</button>
 </div>
+<div class="bo-filtro">@FILTRO@</div>
+<div class="ui-vl-est" id="bo-busca" role="status" aria-live="polite"></div>
 <div class="bo-linha">
  <div class="bo-campo" style="flex:3"><label for="bo-serie"
    data-radai-frase>S&eacute;rie</label><div class="bo-serie-l"><select
@@ -1473,10 +1550,12 @@ PASTA_HTML = u"""<div class="bo-linha">
 def _escolha():
     import radai_tabela_acervo
     import radai_ui
+    pasta = (PASTA_HTML.replace(u"@FAV@", radai_ui.botao_favorita(u"bo-pasta"))
+             .replace(u"@FILTRO@", radai_ui.filtro_de_data(u"bo_dias")))
     abas = radai_ui.abas_de_serie(
         u"bo_origem",
         [(u"acervo", u"Acervo local", radai_tabela_acervo.html(u"bo_acervo")),
-         (u"pasta", u"Aponte uma pasta", PASTA_HTML)],
+         (u"pasta", u"Aponte uma pasta", pasta)],
         padrao=u"pasta", cor_var=u"--mod-bolus")
     return radai_ui.popup_de_serie(
         u"bo_escolha",
@@ -1497,6 +1576,11 @@ def _meta(serie):
 def _voxels_pelo_cabecalho(pasta, uid):
     try:
         import SimpleITK as sitk
+        import engine
+        # GUARDA: a varredura grava a pasta com o prefixo de caminho longo, que o GDCM não lista.
+        pasta = engine._pasta_para_o_gdcm(pasta)
+        if not pasta:
+            return None
         if uid:
             n = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(str(pasta),
                                                               str(uid))
@@ -1522,30 +1606,7 @@ def montar(app, registrar=None):
     def _tela():
         return radai_menu.aplicar(pagina(), "bolus_gerar")
 
-    @app.post("/api/bolus/series")
-    async def _series(request: Request):
-        try:
-            c = await request.json() or {}
-            import radai_batch
-            import radai_config
-            import radai_thumbnail
-            pasta = (str(c.get("pasta") or "").strip()
-                     or radai_config.root_configurado())
-            if not pasta or not os.path.isdir(pasta):
-                return {"series": [],
-                        "erro": u"Pasta não encontrada. Digite a pasta da "
-                                u"tomografia, ou configure a pasta dos exames."}
-            achadas = await radai_web.no_threadpool(
-                radai_batch.varrer, pasta, modalidades=("CT", "MR"),
-                min_cortes=20, incluir_zips=True)
-            fora = lista_para_a_tela(achadas, radai_thumbnail.bilhete)
-            for s, f in zip(achadas, fora):
-                _L[f["b"]] = s
-            return {"series": fora,
-                    "erro": u"" if fora else u"Nenhuma série nesta pasta."}
-        except Exception as e:
-            return {"series": [], "erro": u"%s: %s" % (type(e).__name__,
-                                                        str(e)[:200])}
+    registrar_varredura()
 
     @app.post("/api/bolus/acervo")
     async def _do_acervo(request: Request):

@@ -1,6 +1,6 @@
 # 3D Printed Bolus
 
-**Part of the Radioterapia.AI Local Suite. 3D Printed Bolus: bolus and mould STL files from a box on the MPR and a layer over the skin, for research, phantoms and teaching — teaching and research material, not a medical device.**
+**Part of the Radioterapia.AI Local Suite. 3D Printed Bolus: bolus, mould and surface brachytherapy applicator STL files from a box on the MPR and a layer over the skin, for research, phantoms and teaching — teaching and research material, not a medical device.**
 
 `License: Apache-2.0` · `Component of: Radioterapia.AI Local Suite` · `Platform: Windows 10 and 11, 64-bit`
 
@@ -18,8 +18,10 @@
 ## What it does
 
 The CT is chosen in the Suite's series pop‑up, which opens on the *Point to
-a folder* tab; the *Local archive* tab lists the series this workstation has
-contoured, opened by a ticket and never by a path in the URL. On a recent
+a folder* tab — the folder is read in the background by the Suite's reader,
+with a filter by date and the favourite folder's star; an MR arrives refused,
+with the reason —; the *Local archive* tab lists the series this workstation
+has contoured, opened by a ticket and never by a path in the URL. On a recent
 diagnostic CT, you draw a box on the MPR over the region of the
 skin, and the program builds a layer over the skin inside it:
 
@@ -63,7 +65,32 @@ applicators, and the published bend radii), and some limits **block**:
   floor and the default it generates, with a yellow alert and four more
   requirements. The curvature is measured on the resampled centre line, not
   only at the vertices of the STL.
+- The curvature follows the skin found at the partial‑volume edge of the
+  voxels where the CT crosses −300 HU, which does not shift with where the
+  skin falls inside a slice: on a 65 mm dome the minimum radius comes out
+  within 3% of the true one on slices of 1, 2 and 3 mm, always on the safe
+  side, and a tight 8 mm crest still blocks.
 - Crossing channels, and a channel narrower than the catheter, also block.
+  So does a channel that drops out in the middle with channels accepted on
+  both sides: the centre would be left without a catheter, a risk of
+  under‑covering the target. A channel dropped at the edge is a warning.
+- When no channel fits, the refusal says the placement chosen (and whether
+  the program chose it), the direction of the channels, the best channel
+  (the one with the least path without skin), how much of its path has skin
+  under it, and the separate causes — missing skin on one side, skin at the
+  top of the box, something above the skin —, each with its own proposal.
+  When the box gives no usable channel, the refusal also proposes a trimmed
+  box, checked by tracing the channels in it again, with a **Use the
+  suggested box** button: the box changes only on that click, and the
+  applicator comes out only when you generate again. If the automatic
+  placement would change direction in the trimmed box, no box is proposed
+  and the refusal says so in one line: set the placement in the form and
+  generate again to see the suggestion for it.
+- With the channel direction on automatic, the program traces the channels
+  along both axes perpendicular to the placement and keeps the one that
+  holds more channels (the default one on a tie), and the warning and the
+  sheet say which it chose. A blind‑ended channel needs skin only up to its
+  end.
 - The export is a `.zip` with the STL and a sheet of every parameter, with
   requirements that do not go away: a second CT with the applicator in place
   and a new plan before treating, a pass test with the check cable in each
@@ -115,7 +142,8 @@ requirements and installation are in the Suite README.
 
 This repository has no build of its own. The Suite's packager
 (`build/empacotar_instalador.py --dos-repositorios`) downloads each component
-at the tag pinned in `build/componentes.lock.json`, checks its SHA‑256 and
+at the tag pinned in `build/componentes.lock.json`, checks the SHA‑256 of its
+extracted tree against the lock and
 assembles the installer — see *Build from source* in the Suite README.
 
 ## Running the batteries
@@ -149,6 +177,23 @@ none may be committed to it.**
    carries DICOM (with or without extension), a medical volume or a run
    log — and refuses it too when the scan cannot run, without the Suite
    beside this folder or without Python.
+
+## Reporting a problem
+
+A problem that is not a vulnerability goes through
+**[radioterapia.ai](https://radioterapia.ai)**. Include the Local Suite
+version, the Windows version, the screen language and the step that
+failed — and **never patient data**: no DICOM series, no screenshot of a
+patient image, no log with a patient ID, a UID or a series path. A problem
+reproduced with the synthetic phantoms of the batteries is the quickest to
+fix.
+
+## Security
+
+Found something that exposes patient data or lets the program act where it
+should not? **Do not report it in public.** Use GitHub's private
+vulnerability reporting on this repository, described in
+[SECURITY.md](SECURITY.md).
 
 ## Licence and name
 
