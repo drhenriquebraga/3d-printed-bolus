@@ -290,6 +290,15 @@ CSS = u"""
 .bo-seg[hidden]{display:none}
 .bo-seg button{font-size:11.5px;padding:4px 9px}
 .bo-exps{display:flex;gap:8px;flex-wrap:wrap}
+.bo-validacao{flex:1 0 100%;font-size:12px;line-height:1.5;color:var(--ok,#52b788)}
+.bo-validacao.erro{color:var(--perigo,#e87878)}
+.bo-validacao svg{width:14px;height:14px;vertical-align:-2px;margin-right:5px;
+ stroke:currentColor;stroke-width:2;fill:none}
+.bo-validacao path{stroke-dasharray:20;stroke-dashoffset:0;animation:bo-check .25s ease-out}
+#bo-estado.erro{padding:10px;border:1px solid var(--perigo,#e87878);
+ border-radius:8px;color:var(--perigo,#e87878)}
+@keyframes bo-check{from{stroke-dashoffset:20}to{stroke-dashoffset:0}}
+@media(prefers-reduced-motion:reduce){.bo-validacao path{animation:none}}
 """
 
 JS = r"""
@@ -298,7 +307,7 @@ JS = r"""
 function el(i){ return document.getElementById(i) }
 function escreve(alvo, t){ if(window.uiTexto) window.uiTexto(alvo, t); else alvo.textContent = t }
 var BO = {b:'', meta:null, caixa:null, janela:'pele', idx:{ax:0, co:0, sa:0},
-  corpo:null, bolus:null, molde:null, ver:'ambos', peca:'bolus',
+  corpo:null, bolus:null, molde:null, ver:'molde', peca:'bolus',
   res:null, r:'', velho:false, gerando:false, pedido:0,
   cam:{yaw:0, pitch:12, zoom:1}, camB:{yaw:0, pitch:12, zoom:1}, token:{e:0, d:0}};
 var PLANOS = ['ax', 'co', 'sa'];
@@ -346,7 +355,7 @@ el('bo-listar').onclick = function(){
 function boOpcoes(linhas){
   var s = el('bo-serie');
   linhas.forEach(function(x){
-    if(!x.b || BO.lista[x.b]) return;
+    if(x.carregando || !x.b || BO.lista[x.b]) return;
     var o = document.createElement('option');
     o.value = x.b; o.textContent = x.rotulo + (x.recusada ? ' — ' + x.recusada : '');
     o.disabled = !!x.recusada; s.appendChild(o); BO.lista[x.b] = x;
@@ -770,7 +779,7 @@ function desenharE(q){
 }
 function cenaD(){
   var mo = BO.molde, bo = BO.bolus;
-  if(mo && BO.ver === 'molde') return {pac: null, bol: mo, cx: null, bb: caixaDe(mo), rampaB: cera};
+  if(BO.ver === 'molde') return {pac: null, bol: mo, cx: null, bb: mo ? caixaDe(mo) : null, rampaB: cera};
   if(mo && BO.ver === 'ambos') return {pac: bo, bol: mo, cx: null, bb: caixaDe(mo),
     rampaP: lima, rampaB: cera, alfa: 0.42, nevoa: false};
   return {pac: null, bol: bo, cx: null, bb: caixaDe(bo)};
@@ -792,7 +801,7 @@ function girar(canvas, cam, redesenha){
   canvas.addEventListener('pointermove', function(ev){
     if(!ult) return;
     cam.yaw += (ev.clientX - ult[0]) * 0.5;
-    cam.pitch = Math.max(-85, Math.min(85, cam.pitch + (ev.clientY - ult[1]) * 0.4));
+    cam.pitch = Math.max(-85, Math.min(85, cam.pitch - (ev.clientY - ult[1]) * 0.4));
     ult = [ev.clientX, ev.clientY]; redesenha(0.34);
   });
   function fim(){ if(ult){ ult = null; redesenha(1) } }
@@ -819,7 +828,7 @@ function parametros(){
   var p = {b: BO.b, caixa: BO.caixa, modo: modo,
           espessura: modo === 'caixa' ? null : +el('bo-esp').value, suavizacao: +el('bo-suav').value,
           direcao: el('bo-dir').value, marcas: el('bo-marcas').checked,
-          molde: el('bo-molde').checked};
+          molde: modo !== 'caixa' && el('bo-molde').checked};
   if(p.molde){ p.casca = +el('bo-casca').value; p.abertura = el('bo-abertura').value }
   return p;
 }
@@ -831,8 +840,17 @@ el('bo-suav').oninput = function(){ escreve(el('bo-suav-v'), (+this.value).toFix
 escreve(el('bo-suav-v'), (+el('bo-suav').value).toFixed(1) + ' mm');
 ['bo-esp', 'bo-dir', 'bo-marcas', 'bo-molde', 'bo-casca', 'bo-abertura'].forEach(function(i){ el(i).addEventListener('change', marcarVelho) });
 el('bo-molde').addEventListener('change', function(){ el('bo-molde-ctl').hidden = !this.checked });
-[].forEach.call(document.querySelectorAll('input[name=bo-modo]'), function(r){ r.addEventListener('change', function(){
-  el('bo-esp').disabled = (this.value === 'caixa'); el('bo-esp-caixa').hidden = (this.value !== 'caixa'); marcarVelho() }) });
+function atualizarModoBolus(modo){
+  var caixa = modo === 'caixa';
+  el('bo-esp').disabled = caixa; el('bo-esp-caixa').hidden = !caixa;
+  el('bo-molde').disabled = caixa;
+  if(caixa) el('bo-molde').checked = false;
+  el('bo-molde-ctl').hidden = caixa || !el('bo-molde').checked;
+  marcarVelho();
+}
+[].forEach.call(document.querySelectorAll('input[name=bo-modo]'), function(r){
+  r.addEventListener('change', function(){ atualizarModoBolus(this.value) });
+});
 function marcarVelho(){
   if(!BO.res) return;
   BO.velho = true; el('bo-exportar').disabled = true; el('bo-exportar-molde').disabled = true;
@@ -845,6 +863,7 @@ function mostrarMolde(tem){
 }
 function limparResultado(){
   BO.res = null; BO.bolus = null; BO.molde = null; BO.velho = false; BO.r = '';
+  BO.token.e++; BO.token.d++;
   el('bo-exportar').disabled = true; el('bo-exportar-molde').disabled = true;
   el('bo-ap-exportar').disabled = true;
   el('bo-estado').classList.remove('erro');
@@ -852,6 +871,7 @@ function limparResultado(){
   el('bo-resultado').classList.remove('bo-velho');
   el('bo-tab').innerHTML = ''; el('bo-avisos').innerHTML = ''; el('bo-bio').hidden = true;
   escreve(el('bo-estado'), '');
+  limparValidacoes();
   var g = el('bo-c3b').getContext('2d'); g.clearRect(0, 0, el('bo-c3b').width, el('bo-c3b').height);
 }
 function linha(rot, val){ return '<tr><td>' + rot + '</td><td>' + val + '</td></tr>' }
@@ -876,12 +896,14 @@ el('bo-gerar').onclick = function(){
   var b = BO.b;
   var bt = el('bo-gerar'); bt.disabled = true;
   BO.gerando = true; el('bo-abrir').disabled = true;
+  var pedido = parametros();
+  limparResultado();
   escreve(el('bo-estado'), 'gerando o bólus…');
   var apaga = brilho('gerando o bólus…');
-  post('/api/bolus/gerar', parametros()).then(function(d){
+  post('/api/bolus/gerar', pedido).then(function(d){
     apaga(); bt.disabled = false; BO.gerando = false; liberarAbrir();
     if(BO.b !== b) return;
-    if(d.erro){ escreve(el('bo-estado'), d.erro); return }
+    if(d.erro){ erroBolus(d.erro, pedido.molde); return }
     BO.res = d; BO.r = d.r; BO.velho = false; BO.molde = null;
     el('bo-resultado').classList.remove('bo-velho');
     var e = d.espessura || {}, m = d.malha || {};
@@ -902,6 +924,11 @@ el('bo-gerar').onclick = function(){
     el('bo-bio').hidden = !d.face;
     el('bo-exportar').disabled = !(m.fechada);
     mostrarMolde(!!d.molde);
+    BO.ver = d.molde ? 'molde' : 'bolus';
+    [].forEach.call(document.querySelectorAll('[data-ver]'), function(bt){
+      var on = bt.getAttribute('data-ver') === BO.ver;
+      bt.classList.toggle('on', on); bt.setAttribute('aria-pressed', String(on));
+    });
     el('bo-exportar-molde').disabled = !(d.molde && d.molde.exportavel);
     escreve(el('bo-estado'), m.fechada ? '' : 'A malha não fechou: o STL não é exportado.');
     var vv = (d.molde && VISTA_ABERTURA[d.molde.abertura]) || VISTA[d.direcao] || VISTA.ant;
@@ -916,7 +943,7 @@ el('bo-gerar').onclick = function(){
         if(BO.b !== b || BO.r !== d.r) return;
         BO.molde = vol(d.molde.previa, buf); desenharD(1);
       });
-  }).catch(function(e){ apaga(); bt.disabled = false; BO.gerando = false; liberarAbrir(); escreve(el('bo-estado'), String(e)) });
+  }).catch(function(e){ apaga(); bt.disabled = false; BO.gerando = false; liberarAbrir(); erroBolus(String(e), pedido.molde) });
 };
 
 function abrirAto(peca){
@@ -959,6 +986,27 @@ function brilho(texto){
 var CAMPO_AP = {canal_mm: 'bo-ap-canal', espacamento_mm: 'bo-ap-esp', distancia_mm: 'bo-ap-dist',
   corpo_mm: 'bo-ap-corpo', diametro_externo_mm: 'bo-ap-od', raio: 'bo-ap-raio',
   raio_padrao_mm: 'bo-ap-raio', eixo: 'bo-ap-eixo'};
+function limparValidacoes(){
+  [].forEach.call(document.querySelectorAll('.bo-validacao'), function(n){ n.remove() });
+  [].forEach.call(document.querySelectorAll('[data-bo-invalido]'), function(n){
+    n.removeAttribute('aria-invalid'); n.removeAttribute('data-bo-invalido');
+  });
+}
+function validarCampo(id, texto, erro){
+  var e = el(id); if(!e) return;
+  var alvo = e.closest('.g') || e.parentNode;
+  var n = document.createElement('div'); n.className = 'bo-validacao' + (erro ? ' erro' : '');
+  n.setAttribute('role', erro ? 'alert' : 'status');
+  if(erro){ e.setAttribute('aria-invalid', 'true'); e.setAttribute('data-bo-invalido', '1') }
+  else n.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 10l4 4L17 4"/></svg>';
+  var t = document.createElement('span'); escreve(t, texto); n.appendChild(t); alvo.appendChild(n);
+  if(erro && window.uiTremer) window.uiTremer(alvo);
+}
+function erroBolus(texto, molde){
+  escreve(el('bo-estado'), texto); el('bo-estado').classList.add('erro');
+  validarCampo(molde ? 'bo-molde' : 'bo-gerar', texto, true);
+  if(window.radaiRetraduzir) window.radaiRetraduzir();
+}
 function tremerCampo(campo){
   var e = el(CAMPO_AP[campo] || ''); if(!e || !window.uiTremer) return;
   window.uiTremer(e.closest('.g') || e);
@@ -1006,6 +1054,7 @@ function mostrarBloqueio(d){
   escreve(el('bo-estado'), (d.bloqueio && d.bloqueio.resumo) || d.erro);
   el('bo-estado').classList.add('erro');
   if(d.campo) tremerCampo(d.campo);
+  validarCampo(CAMPO_AP[d.campo] || 'bo-ap-gerar', (d.bloqueio && d.bloqueio.resumo) || d.erro, true);
   var av = el('bo-avisos'); av.innerHTML = '';
   ((d.bloqueio || {}).propostas || []).forEach(function(t){ aviso(av, t, 'bo-bloq') });
   if((d.bloqueio || {}).caixa_sugerida) botaoDaSugerida(av, d.bloqueio.caixa_sugerida);
@@ -1027,6 +1076,11 @@ function botaoDaSugerida(alvo, sug){
 }
 function mostrarAplicador(d, b){
   BO.res = d; BO.r = d.r; BO.velho = false; BO.molde = null;
+  Object.keys(CAMPO_AP).forEach(function(campo, i, campos){
+    var id = CAMPO_AP[campo];
+    if(campos.slice(0, i).some(function(c){ return CAMPO_AP[c] === id })) return;
+    validarCampo(id, 'Conferido nesta geração.', false);
+  });
   el('bo-resultado').classList.remove('bo-velho');
   var m = d.malha || {}, amarela = d.classe === 'amarelo';
   el('bo-tab').innerHTML =
@@ -1183,9 +1237,9 @@ PAGINA = u"""<!doctype html><html><head><meta charset="utf-8">
    <span class="bo-seg" id="bo-ver" hidden>
     <button type="button" class="bo-bt2" data-ver="bolus" aria-pressed="false"
      data-radai-frase>s&oacute; o b&oacute;lus</button>
-    <button type="button" class="bo-bt2" data-ver="molde" aria-pressed="false"
+    <button type="button" class="bo-bt2 on" data-ver="molde" aria-pressed="true"
      data-radai-frase>s&oacute; o molde</button>
-    <button type="button" class="bo-bt2 on" data-ver="ambos" aria-pressed="true"
+    <button type="button" class="bo-bt2" data-ver="ambos" aria-pressed="false"
      data-radai-frase>b&oacute;lus e molde</button></span></div>
   <div class="bo-palco3d b"><canvas id="bo-c3b" role="img"
    aria-label="o resultado em 3D: o bólus e, se pedido, o molde; arraste para girar"></canvas>
@@ -1228,7 +1282,10 @@ PAGINA = u"""<!doctype html><html><head><meta charset="utf-8">
     <span data-radai-frase>Marcas de lado em relevo (letra, seta e
      entalhe)</span></label>
    <label class="g"><input type="checkbox" id="bo-molde">
-    <span data-radai-frase>Molde: casca oca para encher de cera</span></label>
+    <span data-radai-frase>Molde: casca oca para preencher (p.ex. cera ou outro material)</span></label>
+   <div class="bo-legenda" data-radai-frase>O limite da caixa protege a mem&oacute;ria
+    durante a gera&ccedil;&atilde;o; n&atilde;o &eacute; um limite da impressora.
+    O molde usa mais mem&oacute;ria porque precisa de uma segunda malha.</div>
    <div class="bo-molde" id="bo-molde-ctl" hidden>
     <div class="g"><label class="g-rot" for="bo-casca" data-radai-frase>Casca do molde (mm)</label>
      <input type="number" id="bo-casca" min="@CMIN@" max="@CMAX@" step="1"

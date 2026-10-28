@@ -1384,11 +1384,13 @@ def _tracar_eixos(ctx, P):
     for au in ctx["eixos"]:
         maximo = canais_possiveis(ctx["lo"], ctx["hi"], h, an, au, P)[0]
         comp = comprimento_exigido(ctx["lo"][au] * h, ctx["hi"][au] * h, P)
-        if fora and maximo and fora[0]["uteis"] >= maximo:
+        if (fora and maximo and fora[0]["uteis"] >= maximo
+                and fora[0].get("seguro")):
             fora.append({"au": au, "av": 3 - an - au, "canais": [],
                          "descartados": [], "tentados": 0, "buraco": None,
                          "estreita": None, "validade": [], "comprimento": comp,
-                         "uteis": 0, "maximo": maximo, "pulado": True})
+                         "uteis": 0, "maximo": maximo, "pulado": True,
+                         "seguro": False})
             continue
         validade, estreita = [], None
         try:
@@ -1403,25 +1405,41 @@ def _tracar_eixos(ctx, P):
         buraco = recusa_canal_no_meio(canais, descartados, tentados,
                                       ctx["direcao"], au, av, alvo,
                                       comp) if canais else None
+        seguro = bool(canais and buraco is None and estreita is None)
+        if seguro:
+            for c in canais:
+                _montar_canal(c, P, au, ctx["lo"][au] * h,
+                              ctx["hi"][au] * h, h)
+            raio = _medir_curvas(canais, P)
+            folga = (_menor_folga_entre_canais(canais)
+                     if len(canais) > 1 else None)
+            parede = _paredes(canais, ctx["dist"], ctx["lo"], ctx["hi"], h,
+                              an, av, P, ctx["arvore"])[2]
+            seguro = (raio >= P["piso_mm"]
+                      and (folga is None or folga >= PAREDE_MIN_MM)
+                      and parede >= PAREDE_MIN_MM / 2.0)
         fora.append({"au": au, "av": av, "canais": canais,
                      "descartados": descartados, "tentados": tentados,
                      "buraco": buraco, "estreita": estreita,
                      "validade": validade, "comprimento": comp,
                      "uteis": (len(canais) if buraco is None
                                and estreita is None else 0),
-                     "maximo": maximo, "pulado": False})
+                     "maximo": maximo, "pulado": False, "seguro": seguro})
     return fora
 
 
 def escolher_eixo(tracados):
     if all(t["estreita"] is not None for t in tracados):
         raise tracados[0]["estreita"]
-    return max(tracados, key=lambda t: (t["uteis"], t is tracados[0]))
+    return max(tracados, key=lambda t: (bool(t.get("seguro")), t["uteis"],
+                                       t is tracados[0]))
 
 
 def _o_que_coube(t):
     if t.get("pulado"):
         return u"caberiam no máximo %d" % t["maximo"]
+    if t["uteis"] and not t.get("seguro", True):
+        return u"os canais não passaram nas conferências de segurança"
     if t["uteis"]:
         return u"couberam %d" % t["uteis"]
     return u"nenhum canal útil"

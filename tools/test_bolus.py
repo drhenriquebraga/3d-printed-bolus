@@ -1523,6 +1523,85 @@ def _funcoes_js(js, nomes):
     return u"\n".join(partes)
 
 
+def teste_interacao_bolus():
+    secao(u"interação: rotação, molde, recusa junto ao campo e prévia antiga")
+    import shutil
+    import subprocess
+    import radai_bolus_screen as T
+    node = shutil.which("node")
+    if not node:
+        checar(u"node disponível para medir a interação", False)
+        return
+    fn = _funcoes_js(T.JS, ["girar", "atualizarModoBolus", "parametros",
+                            "cenaD", "validarCampo", "erroBolus",
+                            "limparValidacoes", "limparResultado"])
+    harness = r"""
+var NOS = {}, MODO = 'caixa', LIMPO = 0, TREMOR = 0;
+function no(){ return {filhos:[], attrs:{}, checked:false,
+ classList:{add:function(){},remove:function(){}},
+ closest:function(){return this}, setAttribute:function(k,v){this.attrs[k]=v},
+ appendChild:function(c){this.filhos.push(c)},
+ getContext:function(){return {clearRect:function(){LIMPO++}}}} }
+function el(id){return NOS[id] || (NOS[id]=no())}
+var document={querySelector:function(){return {value:MODO}},
+ querySelectorAll:function(){return []}, createElement:function(){return no()}};
+var window={uiTremer:function(){TREMOR++}};
+function escreve(e,t){e.textContent=t}
+function marcarVelho(){}
+function mostrarMolde(){}
+function caixaDe(v){return v ? 'CAIXA' : null}
+var cera='CERA';
+var BO={b:'B',caixa:{},res:{antigo:true},bolus:{antigo:true},molde:{antigo:true},
+ r:'VELHO',velho:false,token:{e:5,d:8},ver:'molde'};
+var canvas={eventos:{},addEventListener:function(k,f){this.eventos[k]=f},
+ setPointerCapture:function(){}};
+var cam={yaw:0,pitch:0}; girar(canvas,cam,function(){});
+canvas.eventos.pointerdown({clientX:0,clientY:0,pointerId:1});
+canvas.eventos.pointermove({clientX:0,clientY:10});
+canvas.eventos.pointerup();
+el('bo-molde').checked=true; atualizarModoBolus('caixa');
+el('bo-molde').checked=true;
+var pedido=parametros(), desabilitado=el('bo-molde').disabled;
+limparResultado();
+var vazio=!BO.res && !BO.bolus && !BO.molde && BO.r==='' && BO.token.d===9;
+erroBolus('RECUSA_DO_MOLDE',true);
+var erro=el('bo-molde').filhos[0];
+validarCampo('bo-ap-raio','CONFERIDO',false);
+var check=el('bo-ap-raio').filhos[0];
+BO.bolus={antigo:true}; BO.molde=null;
+var esperando=cenaD();
+BO.molde={novo:true}; var pronto=cenaD();
+console.log(JSON.stringify({pitch:cam.pitch,desabilitado:desabilitado,
+ pedidoMolde:pedido.molde,vazio:vazio,limpo:LIMPO,
+ erro:erro.filhos[0].textContent,invalido:el('bo-molde').attrs['aria-invalid'],
+ tremor:TREMOR,check:check.innerHTML,esperando:esperando,pronto:pronto}));
+"""
+    arq = os.path.join(_cleanup.temporaria("radai_teste_bolus_interacao_"), "t.js")
+    io.open(arq, "w", encoding="utf-8").write(fn + harness)
+    p = subprocess.run([node, arq], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=60)
+    checar(u"os eventos de interação executam", p.returncode == 0,
+           (p.stderr or u"")[:200])
+    if p.returncode:
+        return
+    o = json.loads(p.stdout)
+    checar(u"arrastar para baixo inverte o pitch nos visores compartilhados",
+           o["pitch"] == -4.0, o)
+    checar(u"modo Caixa desabilita molde e não o envia mesmo com caixa forjada",
+           o["desabilitado"] and o["pedidoMolde"] is False, o)
+    checar(u"uma nova tentativa limpa a prévia e cancela o desenho antigo",
+           o["vazio"] and o["limpo"] == 1, o)
+    checar(u"a recusa fica junto ao molde, acessível e com tremor",
+           o["erro"] == "RECUSA_DO_MOLDE" and o["invalido"] == "true"
+           and o["tremor"] == 1, o)
+    checar(u"parâmetro conferido recebe check SVG pequeno",
+           '<svg' in o["check"] and '<path' in o["check"], o)
+    checar(u"esperar o molde não exibe bólus como substituto; pronto mostra só molde",
+           o["esperando"]["bol"] is None and o["esperando"]["bb"] is None
+           and o["pronto"]["bol"] == {"novo": True}
+           and o["pronto"]["pac"] is None, o)
+
+
 _HARNESS_JS = u"""
 var n = 41, sp = 1.5, off = [-30, -30, -30], d = new Uint8Array(n*n*n);
 for(var z = 0; z < n; z++) for(var y = 0; y < n; y++) for(var x = 0; x < n; x++){
@@ -2339,7 +2418,8 @@ def main():
     for f in (teste_molde_grade, teste_molde_fragmento,
               teste_molde_recusas_e_nome):
         _cronometrar(f, series)
-    for f in (teste_tela, teste_o_popup_da_serie, teste_nomes_acessiveis, teste_js_do_3d, teste_rotas,
+    for f in (teste_tela, teste_o_popup_da_serie, teste_nomes_acessiveis, teste_js_do_3d,
+              teste_interacao_bolus, teste_rotas,
               teste_costura_do_registro, teste_corrida,
               teste_lugares_de_modulo, teste_traducoes,
               teste_pico_de_memoria):

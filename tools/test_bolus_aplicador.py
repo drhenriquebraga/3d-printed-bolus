@@ -1039,6 +1039,29 @@ def teste_os_dois_eixos(s):
            ra["eixos_tracados"])
 
 
+def teste_automatico_procura_eixo_seguro():
+    secao(u"automático: menos canais seguros vencem mais canais abaixo do piso")
+    s = B.abrir(cilindro(R=20.0, L=50.0, esp=(0.5, 0.5, 1.0),
+                         meia=(40.0, 40.0, 60.0)), "CT")
+    cx = caixa(s, (-14, -42, -32), (14, -14, 32))
+    p = {"direcao": "ant", "cateter": "proguide",
+         "afterloader": "microselectron_digital"}
+    e = recusa(A.gerar, s, cx, dict(p, eixo="ll"))
+    checar(u"a direção curva, mesmo com mais canais, continua bloqueada pelo piso",
+           isinstance(e, A.Bloqueio) and e.detalhe.get("motivo")
+           == "raio_abaixo_do_piso", e)
+    seguro = A.gerar(s, cx, dict(p, eixo="cc"))
+    automatico = A.gerar(s, cx, dict(p, eixo="auto"))
+    checar(u"o automático tenta o segundo eixo e preserva o STL do eixo seguro",
+           automatico["eixo_canal"] == seguro["eixo_canal"] == 2
+           and automatico["stl"] == seguro["stl"]
+           and all(t["tracado"] for t in automatico["eixos_tracados"]),
+           automatico["eixos_tracados"])
+    checar(u"o aviso explica por que o eixo com mais canais não foi usado",
+           u"não passaram nas conferências de segurança"
+           in u" ".join(automatico["avisos"]))
+
+
 def teste_fundo_cego_sem_pele_alem_do_fundo(s):
     secao(u"fundo cego: não exige pele além do fundo, onde não há cateter")
     P = {"trajeto": "cego", "entrada": "inicio", "raio_mm": 1.5}
@@ -1109,6 +1132,8 @@ var window = {RETRAD: 0, radaiRetraduzir: function(){ window.RETRAD++ }};
 function escreve(a, t){ a.textContent = t }
 function aviso(a, t, c){ var p = no(''); p.textContent = t; a.appendChild(p) }
 function tremerCampo(){}
+function validarCampo(){}
+var CAMPO_AP = {};
 var DESENHOS = 0;
 function desenharCaixas(){ DESENHOS++ }
 function desenharE(){ DESENHOS++ }
@@ -1766,6 +1791,7 @@ def main():
     teste_recusa_diz_por_que(s)
     teste_buraco_no_meio()
     teste_os_dois_eixos(s)
+    teste_automatico_procura_eixo_seguro()
     teste_fundo_cego_sem_pele_alem_do_fundo(s)
     teste_caixa_sugerida(s)
     teste_a_sugerida_que_vira_a_colocacao_e_dita(s)
